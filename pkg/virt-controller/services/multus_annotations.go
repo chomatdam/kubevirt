@@ -73,7 +73,7 @@ func GenerateMultusCNIAnnotationFromNameScheme(namespace string, interfaces []v1
 		if config != nil && config.NetworkBindingPlugingsEnabled() {
 			if iface := vmispec.LookupInterfaceByName(interfaces, network.Name); iface.Binding != nil {
 				bindingPluginAnnotationData, err := newBindingPluginMultusAnnotationData(
-					config.GetConfig(), iface.Binding.Name, namespace, network.Name)
+					config.GetConfig(), iface.Binding.Name, namespace, network)
 				if err != nil {
 					return "", err
 				}
@@ -90,7 +90,7 @@ func GenerateMultusCNIAnnotationFromNameScheme(namespace string, interfaces []v1
 	return "", nil
 }
 
-func newBindingPluginMultusAnnotationData(kvConfig *v1.KubeVirtConfiguration, pluginName, namespace, networkName string) (*networkv1.NetworkSelectionElement, error) {
+func newBindingPluginMultusAnnotationData(kvConfig *v1.KubeVirtConfiguration, pluginName, namespace string, network v1.Network) (*networkv1.NetworkSelectionElement, error) {
 	plugin := netbinding.ReadNetBindingPluginConfiguration(kvConfig, pluginName)
 	if plugin == nil {
 		return nil, fmt.Errorf("unable to find the network binding plugin '%s' in Kubevirt configuration", pluginName)
@@ -104,12 +104,17 @@ func newBindingPluginMultusAnnotationData(kvConfig *v1.KubeVirtConfiguration, pl
 	// cniArgNetworkName is the CNI arg name for the VM spec network logical name.
 	// The binding plugin CNI should read this arg and realize which logical network it should modify.
 	const cniArgNetworkName = "logicNetworkName"
+	// cniArgIps - Not all plugins are implementing this arg, please check the link below:
+	// https://github.com/containernetworking/cni/blob/main/CONVENTIONS.md#args-in-network-config
+	const cniArgIps = "ips"
 
 	return &networkv1.NetworkSelectionElement{
 		Namespace: netAttachDefNamespace,
 		Name:      netAttachDefName,
+		IPRequest: network.Multus.Ips,
 		CNIArgs: &map[string]interface{}{
-			cniArgNetworkName: networkName,
+			cniArgNetworkName: network.Name,
+			cniArgIps:         network.Multus.Ips,
 		},
 	}, nil
 }
@@ -126,6 +131,7 @@ func newMultusAnnotationData(namespace string, interfaces []v1.Interface, networ
 		MacRequest:       multusIfaceMac,
 		Namespace:        namespace,
 		Name:             networkName,
+		IPRequest:        network.Multus.Ips,
 	}
 }
 

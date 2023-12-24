@@ -132,6 +132,26 @@ var _ = Describe("Multus annotations", func() {
 				))
 			})
 
+			It("should add static IPs to multus annotation", func() {
+				vmi := &v1.VirtualMachineInstance{ObjectMeta: metav1.ObjectMeta{Name: "testvmi", Namespace: "default"}}
+				vmi.Spec.Networks = []v1.Network{
+					{Name: "blue", NetworkSource: v1.NetworkSource{Multus: &v1.MultusNetwork{NetworkName: "test1", Ips: []string{"10.10.0.5"}}}},
+				}
+				vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{
+					{Name: "blue"},
+				}
+
+				config := testsClusterConfig(map[string]v1.InterfaceBindingPlugin{
+					"test-binding": {NetworkAttachmentDefinition: "test1"},
+				})
+
+				Expect(GenerateMultusCNIAnnotation(vmi.Namespace, vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, config)).To(MatchJSON(
+					`[
+						{"name": "test1","namespace": "default","interface": "pod16477688c0e","ips": ["10.10.0.5"]}
+					]`,
+				))
+			})
+
 			DescribeTable("should parse NetworkAttachmentDefinition name and namespace correctly, given",
 				func(netAttachDefRawName, expectedAnnot string) {
 					vmi := &v1.VirtualMachineInstance{ObjectMeta: metav1.ObjectMeta{Name: "testvmi", Namespace: "default"}}

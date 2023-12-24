@@ -20355,6 +20355,21 @@ func schema_kubevirtio_api_core_v1_MultusNetwork(ref common.ReferenceCallback) c
 							Format:      "",
 						},
 					},
+					"ips": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Set static IPs for your VMI.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 				},
 				Required: []string{"networkName"},
 			},

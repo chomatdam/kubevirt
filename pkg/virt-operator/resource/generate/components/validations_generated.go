@@ -6666,6 +6666,11 @@ var CRDsValidation map[string]string = map[string]string{
                             description: Select the default network and add it to
                               the multus-cni.io/default-network annotation.
                             type: boolean
+                          ips:
+                            description: Set static IPs for your VMI.
+                            items:
+                              type: string
+                            type: array
                           networkName:
                             description: 'References to a NetworkAttachmentDefinition
                               CRD object. Format: <networkName>, <namespace>/<networkName>.
@@ -11196,6 +11201,11 @@ var CRDsValidation map[string]string = map[string]string{
                     description: Select the default network and add it to the multus-cni.io/default-network
                       annotation.
                     type: boolean
+                  ips:
+                    description: Set static IPs for your VMI.
+                    items:
+                      type: string
+                    type: array
                   networkName:
                     description: 'References to a NetworkAttachmentDefinition CRD
                       object. Format: <networkName>, <namespace>/<networkName>. If
@@ -16220,6 +16230,11 @@ var CRDsValidation map[string]string = map[string]string{
                             description: Select the default network and add it to
                               the multus-cni.io/default-network annotation.
                             type: boolean
+                          ips:
+                            description: Set static IPs for your VMI.
+                            items:
+                              type: string
+                            type: array
                           networkName:
                             description: 'References to a NetworkAttachmentDefinition
                               CRD object. Format: <networkName>, <namespace>/<networkName>.
@@ -20632,6 +20647,11 @@ var CRDsValidation map[string]string = map[string]string{
                                     description: Select the default network and add
                                       it to the multus-cni.io/default-network annotation.
                                     type: boolean
+                                  ips:
+                                    description: Set static IPs for your VMI.
+                                    items:
+                                      type: string
+                                    type: array
                                   networkName:
                                     description: 'References to a NetworkAttachmentDefinition
                                       CRD object. Format: <networkName>, <namespace>/<networkName>.
@@ -25818,6 +25838,11 @@ var CRDsValidation map[string]string = map[string]string{
                                           add it to the multus-cni.io/default-network
                                           annotation.
                                         type: boolean
+                                      ips:
+                                        description: Set static IPs for your VMI.
+                                        items:
+                                          type: string
+                                        type: array
                                       networkName:
                                         description: 'References to a NetworkAttachmentDefinition
                                           CRD object. Format: <networkName>, <namespace>/<networkName>.

@@ -18439,6 +18439,14 @@
       "description": "Select the default network and add it to the multus-cni.io/default-network annotation.",
       "type": "boolean"
      },
+     "ips": {
+      "description": "Set static IPs for your VMI.",
+      "type": "array",
+      "items": {
+       "type": "string",
+       "default": ""
+      }
+     },
      "networkName": {
       "description": "References to a NetworkAttachmentDefinition CRD object. Format: \u003cnetworkName\u003e, \u003cnamespace\u003e/\u003cnetworkName\u003e. If namespace is not specified, VMI namespace is assumed.",
       "type": "string",

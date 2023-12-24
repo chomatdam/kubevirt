@@ -1547,6 +1547,10 @@ type MultusNetwork struct {
 	// Select the default network and add it to the
 	// multus-cni.io/default-network annotation.
 	Default bool `json:"default,omitempty"`
+
+	// Set static IPs for your VMI.
+	// +optional
+	Ips []string `json:"ips,omitempty"`
 }
 
 // CPUTopology allows specifying the amount of cores, sockets
