@@ -1,0 +1,49 @@
+
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/javascript-node
+{
+  "name": "kubevirt",
+  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+  "image": "mcr.microsoft.com/devcontainers/go:1.21-bullseye",
+
+  // Features to add to the dev container. More info: https://containers.dev/features.
+  "features": {
+    "ghcr.io/devcontainers-contrib/features/sops:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  //  "mounts": [
+  //    "source=${env:HOME}/.gnupg,target=/root/.gnupg"
+  //  ],
+
+  // Configure tool-specific properties.
+  "customizations": {
+    "settings": {
+      "remote.containers.copyGitConfig": true
+    },
+    // Configure properties specific to VS Code.
+    "vscode": {
+      "extensions": [
+        "streetsidesoftware.code-spell-checker"
+      ]
+    }
+  },
+
+  // Use 'forwardPorts' to make a list of ports inside the container available locally.
+  "forwardPorts": [],
+
+  // Use 'portsAttributes' to set default properties for specific forwarded ports.
+  // More info: https://containers.dev/implementors/json_reference/#port-attributes
+  "portsAttributes": {
+  },
+
+  // Use 'postCreateCommand' to run commands after the container is created.
+  "postCreateCommand": "",
+
+  // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+  // "remoteUser": "root"
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "24gb",
+    "storage": "32gb"
+  }
+}
