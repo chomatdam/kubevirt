@@ -1322,16 +1322,18 @@ func generatePodAnnotations(vmi *v1.VirtualMachineInstance, config *virtconfig.C
 
 	annotationsSet[podcmd.DefaultContainerAnnotationName] = "compute"
 
-	nonAbsentIfaces := vmispec.FilterInterfacesSpec(vmi.Spec.Domain.Devices.Interfaces, func(iface v1.Interface) bool {
-		return iface.State != v1.InterfaceStateAbsent
-	})
-	nonAbsentNets := vmispec.FilterNetworksByInterfaces(vmi.Spec.Networks, nonAbsentIfaces)
-	multusAnnotation, err := network.GenerateMultusCNIAnnotation(vmi.Namespace, nonAbsentIfaces, nonAbsentNets, config)
-	if err != nil {
-		return nil, err
-	}
-	if multusAnnotation != "" {
-		annotationsSet[MultusNetworksAnnotation] = multusAnnotation
+	if vmi.Annotations[MultusNetworksAnnotation] == "" {
+		nonAbsentIfaces := vmispec.FilterInterfacesSpec(vmi.Spec.Domain.Devices.Interfaces, func(iface v1.Interface) bool {
+			return iface.State != v1.InterfaceStateAbsent
+		})
+		nonAbsentNets := vmispec.FilterNetworksByInterfaces(vmi.Spec.Networks, nonAbsentIfaces)
+		multusAnnotation, err := network.GenerateMultusCNIAnnotation(vmi.Namespace, nonAbsentIfaces, nonAbsentNets, config)
+		if err != nil {
+			return nil, err
+		}
+		if multusAnnotation != "" {
+			annotationsSet[MultusNetworksAnnotation] = multusAnnotation
+		}
 	}
 
 	if multusDefaultNetwork := lookupMultusDefaultNetworkName(vmi.Spec.Networks); multusDefaultNetwork != "" {
