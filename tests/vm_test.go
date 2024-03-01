@@ -933,7 +933,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 				})
 			})
 
-			Context("Using RunStrategyRerunOnFailure", func() {
+			Context("Using RerunOnFailure run strategy", func() {
 				It("[test_id:2186] should stop a running VM", func() {
 					By("creating a VM with RunStrategyRerunOnFailure")
 					vm := newVirtualMachineWithRunStrategy(v1.RunStrategyRerunOnFailure)
@@ -1304,7 +1304,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 					By("Verify that the virt-launcher pod or its container is in the expected state")
 					vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
-					launcherPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, vm.Namespace)
+					launcherPod, err := libpod.GetPodByVirtualMachineInstance(vmi, vm.Namespace)
 					Expect(err).ToNot(HaveOccurred())
 
 					if toKeep, _ := strconv.ParseBool(keepLauncher); toKeep {
@@ -1877,8 +1877,10 @@ status:
 			Eventually(func(g Gomega) {
 				vm, err = virtClient.VirtualMachine(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
 				g.Expect(err).ToNot(HaveOccurred())
-				g.Expect(controller.HasFinalizer(vm, v1.VirtualMachineControllerFinalizer)).To(BeTrue())
-				g.Expect(controller.HasFinalizer(vm, customFinalizer)).To(BeTrue())
+				g.Expect(vm.Finalizers).To(And(
+					ContainElement(v1.VirtualMachineControllerFinalizer),
+					ContainElement(customFinalizer),
+				))
 			}, 2*time.Minute, 1*time.Second).Should(Succeed())
 
 			err = virtClient.VirtualMachine(testsuite.GetTestNamespace(vm)).Delete(context.Background(), vm.Name, &metav1.DeleteOptions{})
@@ -1887,8 +1889,10 @@ status:
 			Eventually(func(g Gomega) {
 				vm, err = virtClient.VirtualMachine(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
 				g.Expect(err).ToNot(HaveOccurred())
-				g.Expect(controller.HasFinalizer(vm, v1.VirtualMachineControllerFinalizer)).To(BeFalse())
-				g.Expect(controller.HasFinalizer(vm, customFinalizer)).To(BeTrue())
+				g.Expect(vm.Finalizers).To(And(
+					Not(ContainElement(v1.VirtualMachineControllerFinalizer)),
+					ContainElement(customFinalizer),
+				))
 			}, 2*time.Minute, 1*time.Second).Should(Succeed())
 		})
 
@@ -1958,6 +1962,17 @@ status:
 
 	Context("[Serial] when node becomes unhealthy", Serial, func() {
 		const componentName = "virt-handler"
+		var nodeName string
+
+		AfterEach(func() {
+			libpod.DeleteKubernetesAPIBlackhole(getHandlerNodePod(virtClient, nodeName), componentName)
+			Eventually(func(g Gomega) {
+				g.Expect(getHandlerNodePod(virtClient, nodeName).Items[0]).To(HaveConditionTrue(k8sv1.PodReady))
+			}, 120*time.Second, time.Second).Should(Succeed())
+
+			tests.WaitForConfigToBePropagatedToComponent("kubevirt.io=virt-handler", util.GetCurrentKv(virtClient).ResourceVersion,
+				tests.ExpectResourceVersionToBeLessEqualThanConfigVersion, 120*time.Second)
+		})
 
 		It("[Serial] the VMs running in that node should be respawned", func() {
 			By("Starting VM")
@@ -1965,19 +1980,16 @@ status:
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
-			nodeName := vmi.Status.NodeName
+			nodeName = vmi.Status.NodeName
 			oldUID := vmi.UID
 
 			By("Blocking virt-handler from reconciling the VMI")
-			libpod.AddKubernetesApiBlackhole(getHandlerNodePod(virtClient, nodeName), componentName)
-			Eventually(getHandlerNodePod(virtClient, nodeName).Items[0], 120*time.Second, time.Second, HaveConditionFalse(k8sv1.PodReady))
+			libpod.AddKubernetesAPIBlackhole(getHandlerNodePod(virtClient, nodeName), componentName)
+			Eventually(func(g Gomega) {
+				g.Expect(getHandlerNodePod(virtClient, nodeName).Items[0]).To(HaveConditionFalse(k8sv1.PodReady))
+			}, 120*time.Second, time.Second).Should(Succeed())
 
-			DeferCleanup(func() {
-				libpod.DeleteKubernetesApiBlackhole(getHandlerNodePod(virtClient, nodeName), componentName)
-				Eventually(getHandlerNodePod(virtClient, nodeName).Items[0], 120*time.Second, time.Second, HaveConditionTrue(k8sv1.PodReady))
-			})
-
-			pod, err := libvmi.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+			pod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Simulating loss of the virt-launcher")

@@ -64,6 +64,8 @@ import (
 	"kubevirt.io/kubevirt/tests/events"
 	"kubevirt.io/kubevirt/tests/flags"
 	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libnet/cloudinit"
+	"kubevirt.io/kubevirt/tests/libnet/vmnetserver"
 	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/libwait"
 )
@@ -229,7 +231,7 @@ var _ = SIGDescribe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				inboundVMI, err = virtClient.VirtualMachineInstance(namespace).Create(context.Background(), inboundVMI)
 				Expect(err).ToNot(HaveOccurred())
 				inboundVMI = libwait.WaitUntilVMIReady(inboundVMI, console.LoginToCirros)
-				tests.StartTCPServer(inboundVMI, testPort, console.LoginToCirros)
+				vmnetserver.StartTCPServer(inboundVMI, testPort, console.LoginToCirros)
 
 				ip := inboundVMI.Status.Interfaces[0].IP
 
@@ -358,7 +360,7 @@ var _ = SIGDescribe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:c
 			By(checkingEth0MACAddr)
 			masqIface := libvmi.InterfaceDeviceWithMasqueradeBinding()
 			masqIface.MacAddress = "de:ad:00:00:be:af"
-			networkData := libnet.CreateDefaultCloudInitNetworkData()
+			networkData := cloudinit.CreateDefaultCloudInitNetworkData()
 
 			deadbeafVMI := libvmi.NewAlpineWithTestTooling(
 				libvmi.WithInterface(masqIface),
@@ -508,7 +510,7 @@ var _ = SIGDescribe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:c
 
 		It("[test_id:1776]should configure custom Pci address", func() {
 			By("checking eth0 Pci address")
-			testVMI := libvmi.NewAlpine(libvmi.WithMasqueradeNetworking()...)
+			testVMI := libvmi.NewAlpine(libnet.WithMasqueradeNetworking()...)
 			testVMI.Spec.Domain.Devices.Interfaces[0].PciAddress = "0000:01:00.0"
 			testVMI, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Create(context.Background(), testVMI)
 			Expect(err).ToNot(HaveOccurred())
@@ -558,7 +560,7 @@ var _ = SIGDescribe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:c
 	Context("VirtualMachineInstance with dhcp options", func() {
 		It("[test_id:1778]should offer extra dhcp options to pod iface", func() {
 			libnet.SkipWhenClusterNotSupportIpv4()
-			dhcpVMI := libvmi.NewFedora(append(libvmi.WithMasqueradeNetworking(),
+			dhcpVMI := libvmi.NewFedora(append(libnet.WithMasqueradeNetworking(),
 				libvmi.WithResourceMemory("1024M"))...)
 
 			// This IPv4 address tests backwards compatibility of the "DHCPOptions.NTPServers" field.
@@ -655,13 +657,13 @@ var _ = SIGDescribe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:c
 
 		fedoraMasqueradeVMI := func(ports []v1.Port, ipv6NetworkCIDR string) (*v1.VirtualMachineInstance, error) {
 			if ipv6NetworkCIDR == "" {
-				ipv6NetworkCIDR = libnet.DefaultIPv6CIDR
+				ipv6NetworkCIDR = cloudinit.DefaultIPv6CIDR
 			}
-			networkData, err := libnet.NewNetworkData(
-				libnet.WithEthernet("eth0",
-					libnet.WithDHCP4Enabled(),
-					libnet.WithAddresses(ipv6NetworkCIDR),
-					libnet.WithGateway6(gatewayIPFromCIDR(ipv6NetworkCIDR)),
+			networkData, err := cloudinit.NewNetworkData(
+				cloudinit.WithEthernet("eth0",
+					cloudinit.WithDHCP4Enabled(),
+					cloudinit.WithAddresses(ipv6NetworkCIDR),
+					cloudinit.WithGateway6(gatewayIPFromCIDR(ipv6NetworkCIDR)),
 				),
 			)
 			if err != nil {
@@ -735,7 +737,7 @@ var _ = SIGDescribe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				Expect(serverVMI.Status.Interfaces[0].IPs).NotTo(BeEmpty())
 
 				By("starting a tcp server")
-				tests.StartTCPServer(serverVMI, tcpPort, console.LoginToCirros)
+				vmnetserver.StartTCPServer(serverVMI, tcpPort, console.LoginToCirros)
 
 				if networkCIDR == "" {
 					networkCIDR = api.DefaultVMCIDR
@@ -798,7 +800,7 @@ var _ = SIGDescribe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				Expect(serverVMI.Status.Interfaces[0].IPs).NotTo(BeEmpty())
 
 				By("starting a http server")
-				tests.StartPythonHttpServer(serverVMI, tcpPort)
+				vmnetserver.StartPythonHTTPServer(serverVMI, tcpPort)
 
 				Expect(verifyClientServerConnectivity(clientVMI, serverVMI, tcpPort, k8sv1.IPv6Protocol)).To(Succeed())
 			},
@@ -976,11 +978,11 @@ var _ = SIGDescribe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				var err error
 
 				By("Create masquerade VMI")
-				networkData, err := libnet.NewNetworkData(
-					libnet.WithEthernet("eth0",
-						libnet.WithDHCP4Enabled(),
-						libnet.WithDHCP6Enabled(),
-						libnet.WithAddresses(""), // This is a workaround o make fedora client to configure local IPv6
+				networkData, err := cloudinit.NewNetworkData(
+					cloudinit.WithEthernet("eth0",
+						cloudinit.WithDHCP4Enabled(),
+						cloudinit.WithDHCP6Enabled(),
+						cloudinit.WithAddresses(""), // This is a workaround o make fedora client to configure local IPv6
 					),
 				)
 				Expect(err).ToNot(HaveOccurred())
@@ -996,7 +998,7 @@ var _ = SIGDescribe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:c
 
 				By("Create another VMI")
 				anotherVmi = libvmi.NewAlpineWithTestTooling(
-					libvmi.WithMasqueradeNetworking()...,
+					libnet.WithMasqueradeNetworking()...,
 				)
 				anotherVmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Create(context.Background(), anotherVmi)
 				Expect(err).ToNot(HaveOccurred())

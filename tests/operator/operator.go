@@ -86,6 +86,7 @@ import (
 	"kubevirt.io/kubevirt/tests/libmigration"
 	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/libnode"
+	"kubevirt.io/kubevirt/tests/libpod"
 	"kubevirt.io/kubevirt/tests/libstorage"
 	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/libwait"
@@ -125,8 +126,6 @@ var _ = Describe("[Serial][sig-operator]Operator", Serial, decorators.SigOperato
 		copyOriginalKv                         func() *v1.KubeVirt
 		createKv                               func(*v1.KubeVirt)
 		createCdi                              func()
-		sanityCheckDeploymentsExistWithNS      func(string)
-		sanityCheckDeploymentsExist            func()
 		sanityCheckDeploymentsDeleted          func()
 		allPodsAreReady                        func(*v1.KubeVirt)
 		allPodsAreTerminated                   func(*v1.KubeVirt)
@@ -219,22 +218,6 @@ var _ = Describe("[Serial][sig-operator]Operator", Serial, decorators.SigOperato
 				}
 				return true
 			}, 240*time.Second, 1*time.Second).Should(BeTrue())
-		}
-
-		sanityCheckDeploymentsExistWithNS = func(namespace string) {
-			Eventually(func() error {
-				for _, deployment := range []string{"virt-api", "virt-controller"} {
-					_, err := virtClient.AppsV1().Deployments(namespace).Get(context.Background(), deployment, metav1.GetOptions{})
-					if err != nil {
-						return err
-					}
-				}
-				return nil
-			}, 15*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
-		}
-
-		sanityCheckDeploymentsExist = func() {
-			sanityCheckDeploymentsExistWithNS(flags.KubeVirtInstallNamespace)
 		}
 
 		sanityCheckDeploymentsDeleted = func() {
@@ -1537,7 +1520,7 @@ spec:
 			checkVirtComponents(nil)
 
 			By("Starting a VMI")
-			vmi := tests.NewRandomVMI()
+			vmi := libvmi.New(libvmi.WithResourceMemory("1Mi"))
 			vmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
 			Expect(err).NotTo(HaveOccurred())
 			libwait.WaitForSuccessfulVMIStart(vmi)
@@ -1586,7 +1569,7 @@ spec:
 			checkVirtComponents(imagePullSecrets)
 
 			By("Starting a VMI")
-			vmi := tests.NewRandomVMI()
+			vmi := libvmi.New(libvmi.WithResourceMemory("1Mi"))
 			vmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
 			Expect(err).NotTo(HaveOccurred())
 			libwait.WaitForSuccessfulVMIStart(vmi)
@@ -2963,7 +2946,7 @@ spec:
 				}
 				Eventually(matcher.ThisVMI(vmi), 30*time.Second, time.Second).Should(BeInPhase(v1.Scheduled))
 
-				pod, err := libvmi.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+				pod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
 				Expect(err).NotTo(HaveOccurred())
 				var podProfile *k8sv1.SeccompProfile
 				if pod.Spec.SecurityContext != nil {
@@ -3418,6 +3401,20 @@ func nodeSelectorExistInDeployment(virtClient kubecli.KubevirtClient, deployment
 		return false
 	}
 	return true
+}
+
+func sanityCheckDeploymentsExist() {
+	Eventually(func() error {
+		for _, deployment := range []string{"virt-api", "virt-controller"} {
+			virtClient := kubevirt.Client()
+			namespace := flags.KubeVirtInstallNamespace
+			_, err := virtClient.AppsV1().Deployments(namespace).Get(context.Background(), deployment, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}, 15*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 }
 
 // Deprecated: deprecatedBeforeAll must not be used. Tests need to be self-contained to allow sane cleanup, accurate reporting and

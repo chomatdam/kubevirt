@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	"kubevirt.io/kubevirt/pkg/virt-controller/network"
+
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
 
 	backendstorage "kubevirt.io/kubevirt/pkg/storage/backend-storage"
@@ -372,14 +374,14 @@ func (c *VMIController) execute(key string) error {
 
 	// Only consider pods which belong to this vmi
 	// excluding unfinalized migration targets from this list.
-	pod, err := controller.CurrentVMIPod(vmi, c.podInformer)
+	pod, err := controller.CurrentVMIPod(vmi, c.podInformer.GetIndexer())
 	if err != nil {
 		logger.Reason(err).Error("Failed to fetch pods for namespace from cache.")
 		return err
 	}
 
 	// Get all dataVolumes associated with this vmi
-	dataVolumes, err := storagetypes.ListDataVolumesFromVolumes(vmi.Namespace, vmi.Spec.Volumes, c.dataVolumeInformer, c.pvcInformer)
+	dataVolumes, err := storagetypes.ListDataVolumesFromVolumes(vmi.Namespace, vmi.Spec.Volumes, c.dataVolumeInformer.GetStore(), c.pvcInformer)
 	if err != nil {
 		logger.Reason(err).Error("Failed to fetch dataVolumes for namespace from cache.")
 		return err
@@ -1134,10 +1136,7 @@ func isPodFailed(pod *k8sv1.Pod) bool {
 }
 
 func podExists(pod *k8sv1.Pod) bool {
-	if pod != nil {
-		return true
-	}
-	return false
+	return pod != nil
 }
 
 func (c *VMIController) hotplugPodsReady(vmi *virtv1.VirtualMachineInstance, virtLauncherPod *k8sv1.Pod) (bool, syncError) {
@@ -1284,7 +1283,7 @@ func (c *VMIController) sync(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod,
 			}
 		}
 
-		if vmiSpecIfaces, vmiSpecNets, dynamicIfacesExist := calculateInterfacesAndNetworksForMultusAnnotationUpdate(vmi); dynamicIfacesExist {
+		if vmiSpecIfaces, vmiSpecNets, dynamicIfacesExist := network.CalculateInterfacesAndNetworksForMultusAnnotationUpdate(vmi); dynamicIfacesExist {
 			if err := c.updateMultusAnnotation(vmi.Namespace, vmiSpecIfaces, vmiSpecNets, pod); err != nil {
 				return &syncErrorImpl{
 					err:    fmt.Errorf("failed to hot{un}plug network interfaces for vmi [%s/%s]: %w", vmi.GetNamespace(), vmi.GetName(), err),
@@ -2123,7 +2122,7 @@ func (c *VMIController) createAttachmentPopulateTriggerPodTemplate(volume *virtv
 }
 
 func (c *VMIController) deleteAllAttachmentPods(vmi *virtv1.VirtualMachineInstance) error {
-	virtlauncherPod, err := controller.CurrentVMIPod(vmi, c.podInformer)
+	virtlauncherPod, err := controller.CurrentVMIPod(vmi, c.podInformer.GetIndexer())
 	if err != nil {
 		return err
 	}
@@ -2353,9 +2352,9 @@ func (c *VMIController) getVolumePhaseMessageReason(volume *virtv1.Volume, names
 func (c *VMIController) updateMultusAnnotation(namespace string, interfaces []virtv1.Interface, networks []virtv1.Network, pod *k8sv1.Pod) error {
 	podAnnotations := pod.GetAnnotations()
 
-	indexedMultusStatusIfaces := services.NonDefaultMultusNetworksIndexedByIfaceName(pod)
+	indexedMultusStatusIfaces := network.NonDefaultMultusNetworksIndexedByIfaceName(pod)
 	networkToPodIfaceMap := namescheme.CreateNetworkNameSchemeByPodNetworkStatus(networks, indexedMultusStatusIfaces)
-	multusAnnotations, err := services.GenerateMultusCNIAnnotationFromNameScheme(namespace, interfaces, networks, networkToPodIfaceMap, c.clusterConfig)
+	multusAnnotations, err := network.GenerateMultusCNIAnnotationFromNameScheme(namespace, interfaces, networks, networkToPodIfaceMap, c.clusterConfig)
 	if err != nil {
 		return err
 	}
@@ -2380,7 +2379,7 @@ func (c *VMIController) updateMultusAnnotation(namespace string, interfaces []vi
 }
 
 func (c *VMIController) updateInterfaceStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod) error {
-	indexedMultusStatusIfaces := services.NonDefaultMultusNetworksIndexedByIfaceName(pod)
+	indexedMultusStatusIfaces := network.NonDefaultMultusNetworksIndexedByIfaceName(pod)
 	ifaceNamingScheme := namescheme.CreateNetworkNameSchemeByPodNetworkStatus(vmi.Spec.Networks, indexedMultusStatusIfaces)
 	for _, network := range vmi.Spec.Networks {
 		vmiIfaceStatus := vmispec.LookupInterfaceStatusByName(vmi.Status.Interfaces, network.Name)

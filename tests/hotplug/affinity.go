@@ -6,6 +6,14 @@ import (
 	"fmt"
 	"time"
 
+	"kubevirt.io/kubevirt/tests/libnet"
+
+	"kubevirt.io/kubevirt/pkg/pointer"
+
+	v1 "kubevirt.io/api/core/v1"
+
+	util2 "kubevirt.io/kubevirt/tests/util"
+
 	"kubevirt.io/kubevirt/tests/libvmi"
 
 	"kubevirt.io/kubevirt/tests/testsuite"
@@ -16,7 +24,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
@@ -32,6 +39,9 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 	)
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
+		kv := util2.GetCurrentKv(virtClient)
+		kv.Spec.Configuration.VMRolloutStrategy = pointer.P(v1.VMRolloutStrategyLiveUpdate)
+		testsuite.UpdateKubeVirtConfigValue(kv.Spec.Configuration)
 	})
 
 	Context("Updating VMs node affinity", func() {
@@ -93,16 +103,13 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 		It("should successfully update node selector", func() {
 
 			By("Creating a running VM")
-			options := libvmi.WithMasqueradeNetworking()
+			options := libnet.WithMasqueradeNetworking()
 			options = append(options, libvmi.WithCPUCount(1, 2, 1))
 			vmi := libvmi.NewAlpineWithTestTooling(
 				options...,
 			)
 			vmi.Namespace = testsuite.GetTestNamespace(vmi)
 			vm := libvmi.NewVirtualMachine(vmi, libvmi.WithRunning())
-			vm.Spec.LiveUpdateFeatures = &v1.LiveUpdateFeatures{
-				Affinity: &v1.LiveUpdateAffinity{},
-			}
 
 			vm, err := virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm)
 			Expect(err).ToNot(HaveOccurred())
@@ -156,13 +163,10 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 
 			By("Creating a running VM")
 			vmi := libvmi.NewAlpineWithTestTooling(
-				libvmi.WithMasqueradeNetworking()...,
+				libnet.WithMasqueradeNetworking()...,
 			)
 			vmi.Namespace = testsuite.GetTestNamespace(vmi)
 			vm := libvmi.NewVirtualMachine(vmi, libvmi.WithRunning())
-			vm.Spec.LiveUpdateFeatures = &v1.LiveUpdateFeatures{
-				Affinity: &v1.LiveUpdateAffinity{},
-			}
 
 			vm, err := virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm)
 			Expect(err).ToNot(HaveOccurred())

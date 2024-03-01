@@ -127,7 +127,7 @@ type DomainManager interface {
 	GetGuestInfo() v1.VirtualMachineInstanceGuestAgentInfo
 	GetUsers() []v1.VirtualMachineInstanceGuestOSUser
 	GetFilesystems() []v1.VirtualMachineInstanceFileSystem
-	FinalizeVirtualMachineMigration(*v1.VirtualMachineInstance) error
+	FinalizeVirtualMachineMigration(*v1.VirtualMachineInstance, *cmdv1.VirtualMachineOptions) error
 	HotplugHostDevices(vmi *v1.VirtualMachineInstance) error
 	InterfacesStatus() []api.InterfaceStatus
 	GetGuestOSInfo() *api.GuestOSInfo
@@ -402,8 +402,8 @@ func (l *LibvirtDomainManager) PrepareMigrationTarget(
 }
 
 // FinalizeVirtualMachineMigration finalized the migration after the migration has completed and vmi is running on target pod.
-func (l *LibvirtDomainManager) FinalizeVirtualMachineMigration(vmi *v1.VirtualMachineInstance) error {
-	return l.finalizeMigrationTarget(vmi)
+func (l *LibvirtDomainManager) FinalizeVirtualMachineMigration(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error {
+	return l.finalizeMigrationTarget(vmi, options)
 }
 
 // UpdateVCPUs plugs or unplugs vCPUs on a running domain
@@ -2029,7 +2029,7 @@ func (l *LibvirtDomainManager) GetGuestInfo() v1.VirtualMachineInstanceGuestAgen
 			FileSystemType: fs.Type,
 			UsedBytes:      fs.UsedBytes,
 			TotalBytes:     fs.TotalBytes,
-			Disk:           fs.Disk,
+			Disk:           l.parseFSDisks(fs.Disk),
 		})
 	}
 
@@ -2074,7 +2074,7 @@ func (l *LibvirtDomainManager) GetFilesystems() []v1.VirtualMachineInstanceFileS
 			FileSystemType: fs.Type,
 			UsedBytes:      fs.UsedBytes,
 			TotalBytes:     fs.TotalBytes,
-			Disk:           fs.Disk,
+			Disk:           l.parseFSDisks(fs.Disk),
 		})
 	}
 
@@ -2175,6 +2175,18 @@ func (l *LibvirtDomainManager) InjectLaunchSecret(vmi *v1.VirtualMachineInstance
 	}
 
 	return nil
+}
+
+func (l *LibvirtDomainManager) parseFSDisks(fsDisks []api.FSDisk) []v1.VirtualMachineInstanceFileSystemDisk {
+	disks := []v1.VirtualMachineInstanceFileSystemDisk{}
+	for _, fsDisk := range fsDisks {
+		disks = append(disks, v1.VirtualMachineInstanceFileSystemDisk{
+			Serial:  fsDisk.Serial,
+			BusType: fsDisk.BusType,
+		})
+	}
+
+	return disks
 }
 
 // check whether VMI has a certain condition

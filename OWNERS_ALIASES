@@ -33,7 +33,6 @@ aliases:
     - jean-edouard
     - AlonaKaplan
     - mhenriks
-    - maiqueb
     - EdDev
     - acardace
     - xpivarc
@@ -43,6 +42,7 @@ aliases:
     - 0xFelix
     - lyarwood
     - fossedihelm
+    - victortoso
 
   #
   # SIG Test
@@ -55,6 +55,8 @@ aliases:
     - enp0s3
     - xpivarc
     - acardace
+    - dhiller
+    - AlonaKaplan
 
   #
   # SIG Network
@@ -64,11 +66,7 @@ aliases:
     - AlonaKaplan
     - EdDev
     - RamLavi
-    - maiqueb
     - ormergi
-    - oshoval
-    - phoracek
-    - qinqon
   sig-network-approvers:
     - AlonaKaplan
 
@@ -87,6 +85,7 @@ aliases:
   #
   sig-storage-approvers:
     - mhenriks
+    - alicefr
   sig-storage-reviewers:
     - awels
     - akalenyu
@@ -120,8 +119,10 @@ aliases:
   # Owns everything which is taking place on a node, for example
   # (but not limited to) groups, SELinux, node labels, …
   #
-  sig-node-approvers: []
-  sig-node-reviewers: []
+  sig-node-approvers:
+    - jean-edouard
+  sig-node-reviewers:
+    - victortoso
 
   #
   # SIG Observability
@@ -146,6 +147,8 @@ aliases:
     - dhiller
   sig-buildsystem-reviewers:
     - brianmcarey
+    - enp0s3
+    - xpivarc
 
   #
   # SIG Architecture

@@ -20,6 +20,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/apimachinery/patch:go_default_library",
+        "//pkg/certificates/bootstrap:go_default_library",
         "//pkg/util/cluster:go_default_library",
         "//pkg/util/tls:go_default_library",
         "//pkg/virt-config:go_default_library",
@@ -37,6 +38,7 @@ go_library(
         "//tests/framework/kubevirt:go_default_library",
         "//tests/framework/matcher:go_default_library",
         "//tests/libinfra:go_default_library",
+        "//tests/libmonitoring:go_default_library",
         "//tests/libnet:go_default_library",
         "//tests/libnode:go_default_library",
         "//tests/libreplicaset:go_default_library",

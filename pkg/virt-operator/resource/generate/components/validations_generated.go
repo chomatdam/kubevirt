@@ -1230,6 +1230,15 @@ var CRDsValidation map[string]string = map[string]string{
                           The standard domain attachment can be used instead or in
                           addition to the sidecarImage. version: 1alphav1'
                         type: string
+                      migration:
+                        description: 'Migration means the VM using the plugin can
+                          be safely migrated version: 1alphav1'
+                        properties:
+                          method:
+                            description: 'Method defines a pre-defined migration methodology
+                              version: 1alphav1'
+                            type: string
+                        type: object
                       networkAttachmentDefinition:
                         description: 'NetworkAttachmentDefinition references to a
                           NetworkAttachmentDefinition CR object. Format: <name>, <namespace>/<name>.
@@ -1482,6 +1491,14 @@ var CRDsValidation map[string]string = map[string]string{
                     if AutoattachSerialConsole is disabled.
                   type: object
               type: object
+            vmRolloutStrategy:
+              description: VMRolloutStrategy defines how changes to a VM object propagate
+                to its VMI
+              enum:
+              - Stage
+              - LiveUpdate
+              nullable: true
+              type: string
             vmStateStorageClass:
               description: VMStateStorageClass is the name of the storage class to
                 use for the PVCs created to preserve VM state, like TPM. The storage
@@ -4326,40 +4343,6 @@ var CRDsValidation map[string]string = map[string]string{
                 is applied to the VirtualMachineInstance.
               type: string
           type: object
-        liveUpdateFeatures:
-          description: LiveUpdateFeatures references a configuration of hotpluggable
-            resources
-          properties:
-            affinity:
-              description: Affinity allows live updating the virtual machines node
-                affinity
-              type: object
-            cpu:
-              description: LiveUpdateCPU holds hotplug configuration for the CPU resource.
-                Empty struct indicates that default will be used for maxSockets. Default
-                is specified on cluster level. Absence of the struct means opt-out
-                from CPU hotplug functionality.
-              properties:
-                maxSockets:
-                  description: The maximum amount of sockets that can be hot-plugged
-                    to the Virtual Machine
-                  format: int32
-                  type: integer
-              type: object
-            memory:
-              description: MemoryLiveUpdateConfiguration defines the live update memory
-                features for the VirtualMachine
-              properties:
-                maxGuest:
-                  anyOf:
-                  - type: integer
-                  - type: string
-                  description: MaxGuest defines the maximum amount memory that can
-                    be allocated for the VM.
-                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                  x-kubernetes-int-or-string: true
-              type: object
-          type: object
         preference:
           description: PreferenceMatcher references a set of preference that is used
             to fill fields in Template
@@ -4512,6 +4495,7 @@ var CRDsValidation map[string]string = map[string]string{
                         - source
                         type: object
                     type: object
+                  maxItems: 256
                   type: array
                   x-kubernetes-list-type: atomic
                 affinity:
@@ -5772,6 +5756,7 @@ var CRDsValidation map[string]string = map[string]string{
                             required:
                             - name
                             type: object
+                          maxItems: 256
                           type: array
                         downwardMetrics:
                           description: DownwardMetrics creates a virtio serials for
@@ -6035,6 +6020,7 @@ var CRDsValidation map[string]string = map[string]string{
                             required:
                             - name
                             type: object
+                          maxItems: 256
                           type: array
                         logSerialConsole:
                           description: Whether to log the auto-attached default serial
@@ -6710,6 +6696,7 @@ var CRDsValidation map[string]string = map[string]string{
                     required:
                     - name
                     type: object
+                  maxItems: 256
                   type: array
                 nodeSelector:
                   additionalProperties:
@@ -7492,6 +7479,7 @@ var CRDsValidation map[string]string = map[string]string{
                     required:
                     - name
                     type: object
+                  maxItems: 256
                   type: array
               required:
               - domain
@@ -9195,6 +9183,7 @@ var CRDsValidation map[string]string = map[string]string{
                 - source
                 type: object
             type: object
+          maxItems: 256
           type: array
           x-kubernetes-list-type: atomic
         affinity:
@@ -10361,6 +10350,7 @@ var CRDsValidation map[string]string = map[string]string{
                     required:
                     - name
                     type: object
+                  maxItems: 256
                   type: array
                 downwardMetrics:
                   description: DownwardMetrics creates a virtio serials for exposing
@@ -10613,6 +10603,7 @@ var CRDsValidation map[string]string = map[string]string{
                     required:
                     - name
                     type: object
+                  maxItems: 256
                   type: array
                 logSerialConsole:
                   description: Whether to log the auto-attached default serial console
@@ -11239,6 +11230,7 @@ var CRDsValidation map[string]string = map[string]string{
             required:
             - name
             type: object
+          maxItems: 256
           type: array
         nodeSelector:
           additionalProperties:
@@ -11981,6 +11973,7 @@ var CRDsValidation map[string]string = map[string]string{
             required:
             - name
             type: object
+          maxItems: 256
           type: array
       required:
       - domain
@@ -12203,6 +12196,9 @@ var CRDsValidation map[string]string = map[string]string{
             failed:
               description: Indicates that the migration failed
               type: boolean
+            failureReason:
+              description: Contains the reason why the migration failed
+              type: string
             migrationConfiguration:
               description: Migration configurations to apply
               properties:
@@ -12298,6 +12294,8 @@ var CRDsValidation map[string]string = map[string]string{
               type: string
             sourceNode:
               description: The source node that the VMI originated on
+              type: string
+            sourcePod:
               type: string
             startTimestamp:
               description: The time the migration action began
@@ -12601,6 +12599,9 @@ var CRDsValidation map[string]string = map[string]string{
             failed:
               description: Indicates that the migration failed
               type: boolean
+            failureReason:
+              description: Contains the reason why the migration failed
+              type: string
             migrationConfiguration:
               description: Migration configurations to apply
               properties:
@@ -12696,6 +12697,8 @@ var CRDsValidation map[string]string = map[string]string{
               type: string
             sourceNode:
               description: The source node that the VMI originated on
+              type: string
+            sourcePod:
               type: string
             startTimestamp:
               description: The time the migration action began
@@ -13140,6 +13143,7 @@ var CRDsValidation map[string]string = map[string]string{
                     required:
                     - name
                     type: object
+                  maxItems: 256
                   type: array
                 downwardMetrics:
                   description: DownwardMetrics creates a virtio serials for exposing
@@ -13392,6 +13396,7 @@ var CRDsValidation map[string]string = map[string]string{
                     required:
                     - name
                     type: object
+                  maxItems: 256
                   type: array
                 logSerialConsole:
                   description: Whether to log the auto-attached default serial console
@@ -14066,6 +14071,7 @@ var CRDsValidation map[string]string = map[string]string{
                         - source
                         type: object
                     type: object
+                  maxItems: 256
                   type: array
                   x-kubernetes-list-type: atomic
                 affinity:
@@ -15326,6 +15332,7 @@ var CRDsValidation map[string]string = map[string]string{
                             required:
                             - name
                             type: object
+                          maxItems: 256
                           type: array
                         downwardMetrics:
                           description: DownwardMetrics creates a virtio serials for
@@ -15589,6 +15596,7 @@ var CRDsValidation map[string]string = map[string]string{
                             required:
                             - name
                             type: object
+                          maxItems: 256
                           type: array
                         logSerialConsole:
                           description: Whether to log the auto-attached default serial
@@ -16264,6 +16272,7 @@ var CRDsValidation map[string]string = map[string]string{
                     required:
                     - name
                     type: object
+                  maxItems: 256
                   type: array
                 nodeSelector:
                   additionalProperties:
@@ -17046,6 +17055,7 @@ var CRDsValidation map[string]string = map[string]string{
                     required:
                     - name
                     type: object
+                  maxItems: 256
                   type: array
               required:
               - domain
@@ -18151,40 +18161,6 @@ var CRDsValidation map[string]string = map[string]string{
                         instancetype is applied to the VirtualMachineInstance.
                       type: string
                   type: object
-                liveUpdateFeatures:
-                  description: LiveUpdateFeatures references a configuration of hotpluggable
-                    resources
-                  properties:
-                    affinity:
-                      description: Affinity allows live updating the virtual machines
-                        node affinity
-                      type: object
-                    cpu:
-                      description: LiveUpdateCPU holds hotplug configuration for the
-                        CPU resource. Empty struct indicates that default will be
-                        used for maxSockets. Default is specified on cluster level.
-                        Absence of the struct means opt-out from CPU hotplug functionality.
-                      properties:
-                        maxSockets:
-                          description: The maximum amount of sockets that can be hot-plugged
-                            to the Virtual Machine
-                          format: int32
-                          type: integer
-                      type: object
-                    memory:
-                      description: MemoryLiveUpdateConfiguration defines the live
-                        update memory features for the VirtualMachine
-                      properties:
-                        maxGuest:
-                          anyOf:
-                          - type: integer
-                          - type: string
-                          description: MaxGuest defines the maximum amount memory
-                            that can be allocated for the VM.
-                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                          x-kubernetes-int-or-string: true
-                      type: object
-                  type: object
                 preference:
                   description: PreferenceMatcher references a set of preference that
                     is used to fill fields in Template
@@ -18345,6 +18321,7 @@ var CRDsValidation map[string]string = map[string]string{
                                 - source
                                 type: object
                             type: object
+                          maxItems: 256
                           type: array
                           x-kubernetes-list-type: atomic
                         affinity:
@@ -19720,6 +19697,7 @@ var CRDsValidation map[string]string = map[string]string{
                                     required:
                                     - name
                                     type: object
+                                  maxItems: 256
                                   type: array
                                 downwardMetrics:
                                   description: DownwardMetrics creates a virtio serials
@@ -20001,6 +19979,7 @@ var CRDsValidation map[string]string = map[string]string{
                                     required:
                                     - name
                                     type: object
+                                  maxItems: 256
                                   type: array
                                 logSerialConsole:
                                   description: Whether to log the auto-attached default
@@ -20711,6 +20690,7 @@ var CRDsValidation map[string]string = map[string]string{
                             required:
                             - name
                             type: object
+                          maxItems: 256
                           type: array
                         nodeSelector:
                           additionalProperties:
@@ -21551,6 +21531,7 @@ var CRDsValidation map[string]string = map[string]string{
                             required:
                             - name
                             type: object
+                          maxItems: 256
                           type: array
                       required:
                       - domain
@@ -23252,41 +23233,6 @@ var CRDsValidation map[string]string = map[string]string{
                             is applied to the VirtualMachineInstance.
                           type: string
                       type: object
-                    liveUpdateFeatures:
-                      description: LiveUpdateFeatures references a configuration of
-                        hotpluggable resources
-                      properties:
-                        affinity:
-                          description: Affinity allows live updating the virtual machines
-                            node affinity
-                          type: object
-                        cpu:
-                          description: LiveUpdateCPU holds hotplug configuration for
-                            the CPU resource. Empty struct indicates that default
-                            will be used for maxSockets. Default is specified on cluster
-                            level. Absence of the struct means opt-out from CPU hotplug
-                            functionality.
-                          properties:
-                            maxSockets:
-                              description: The maximum amount of sockets that can
-                                be hot-plugged to the Virtual Machine
-                              format: int32
-                              type: integer
-                          type: object
-                        memory:
-                          description: MemoryLiveUpdateConfiguration defines the live
-                            update memory features for the VirtualMachine
-                          properties:
-                            maxGuest:
-                              anyOf:
-                              - type: integer
-                              - type: string
-                              description: MaxGuest defines the maximum amount memory
-                                that can be allocated for the VM.
-                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                              x-kubernetes-int-or-string: true
-                          type: object
-                      type: object
                     preference:
                       description: PreferenceMatcher references a set of preference
                         that is used to fill fields in Template
@@ -23456,6 +23402,7 @@ var CRDsValidation map[string]string = map[string]string{
                                     - source
                                     type: object
                                 type: object
+                              maxItems: 256
                               type: array
                               x-kubernetes-list-type: atomic
                             affinity:
@@ -24907,6 +24854,7 @@ var CRDsValidation map[string]string = map[string]string{
                                         required:
                                         - name
                                         type: object
+                                      maxItems: 256
                                       type: array
                                     downwardMetrics:
                                       description: DownwardMetrics creates a virtio
@@ -25200,6 +25148,7 @@ var CRDsValidation map[string]string = map[string]string{
                                         required:
                                         - name
                                         type: object
+                                      maxItems: 256
                                       type: array
                                     logSerialConsole:
                                       description: Whether to log the auto-attached
@@ -25933,6 +25882,7 @@ var CRDsValidation map[string]string = map[string]string{
                                 required:
                                 - name
                                 type: object
+                              maxItems: 256
                               type: array
                             nodeSelector:
                               additionalProperties:
@@ -26809,6 +26759,7 @@ var CRDsValidation map[string]string = map[string]string{
                                 required:
                                 - name
                                 type: object
+                              maxItems: 256
                               type: array
                           required:
                           - domain

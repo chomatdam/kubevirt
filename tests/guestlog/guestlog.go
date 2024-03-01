@@ -27,6 +27,7 @@ import (
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	. "kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libpod"
 	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/testsuite"
 )
@@ -38,16 +39,11 @@ var _ = Describe("[sig-compute]Guest console log", decorators.SigCompute, func()
 
 	var (
 		virtClient kubecli.KubevirtClient
-		alpineVmi  *v1.VirtualMachineInstance
 		cirrosVmi  *v1.VirtualMachineInstance
 	)
 
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
-
-		alpineVmi = libvmi.NewAlpine()
-		alpineVmi.Spec.Domain.Devices.AutoattachSerialConsole = pointer.P(true)
-		alpineVmi.Spec.Domain.Devices.LogSerialConsole = pointer.P(true)
 
 		cirrosVmi = libvmi.NewCirros()
 		cirrosVmi.Spec.Domain.Devices.AutoattachSerialConsole = pointer.P(true)
@@ -58,12 +54,12 @@ var _ = Describe("[sig-compute]Guest console log", decorators.SigCompute, func()
 		Context("set LogSerialConsole", func() {
 			DescribeTable("should successfully start with LogSerialConsole", func(autoattachSerialConsole, logSerialConsole, expected bool) {
 				By("Starting a VMI")
-				alpineVmi.Spec.Domain.Devices.AutoattachSerialConsole = pointer.P(autoattachSerialConsole)
-				alpineVmi.Spec.Domain.Devices.LogSerialConsole = pointer.P(logSerialConsole)
-				vmi := tests.RunVMIAndExpectLaunch(alpineVmi, cirrosStartupTimeout)
+				cirrosVmi.Spec.Domain.Devices.AutoattachSerialConsole = pointer.P(autoattachSerialConsole)
+				cirrosVmi.Spec.Domain.Devices.LogSerialConsole = pointer.P(logSerialConsole)
+				vmi := tests.RunVMIAndExpectLaunch(cirrosVmi, cirrosStartupTimeout)
 
 				By("Finding virt-launcher pod")
-				virtlauncherPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+				virtlauncherPod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
 				if expected {
 					Expect(virtlauncherPod.Spec.Containers).To(HaveLen(3))
@@ -97,7 +93,7 @@ var _ = Describe("[sig-compute]Guest console log", decorators.SigCompute, func()
 				vmi := tests.RunVMIAndExpectLaunch(cirrosVmi, cirrosStartupTimeout)
 
 				By("Finding virt-launcher pod")
-				virtlauncherPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+				virtlauncherPod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
 				foundContainer := false
 				for _, container := range virtlauncherPod.Spec.Containers {
@@ -140,7 +136,7 @@ var _ = Describe("[sig-compute]Guest console log", decorators.SigCompute, func()
 				vmi = tests.RunVMIAndExpectLaunch(cirrosVmi, cirrosStartupTimeout)
 
 				By("Finding virt-launcher pod")
-				virtlauncherPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+				virtlauncherPod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Getting logs with logs API and ensure the logs are correctly ordered with no unexpected line breaks")
@@ -189,7 +185,7 @@ var _ = Describe("[sig-compute]Guest console log", decorators.SigCompute, func()
 				vmi = tests.RunVMIAndExpectLaunch(cirrosVmi, cirrosStartupTimeout)
 
 				By("Finding virt-launcher pod")
-				virtlauncherPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+				virtlauncherPod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Generating 9MB of log data to force log rotation and discarding")
@@ -221,7 +217,7 @@ var _ = Describe("[sig-compute]Guest console log", decorators.SigCompute, func()
 				Expect(*vmi.Status.QOSClass).To(Equal(k8sv1.PodQOSGuaranteed))
 
 				By("Finding virt-launcher pod")
-				virtlauncherPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+				virtlauncherPod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Generating 1MB of log data")
@@ -259,7 +255,7 @@ var _ = Describe("[sig-compute]Guest console log", decorators.SigCompute, func()
 			AfterEach(func() {
 				if CurrentSpecReport().Failed() {
 					if vmi != nil {
-						virtlauncherPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+						virtlauncherPod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 						if err == nil {
 							artifactsDir, _ := os.LookupEnv("ARTIFACTS")
 							outputString, err := exec.ExecuteCommandOnPod(virtClient, virtlauncherPod, "guest-console-log", []string{"/bin/bash", "-c", "/bin/tail -v -n +1 " + fmt.Sprintf("/var/run/kubevirt-private/%v/virt-serial*-log*", vmi.UID)})

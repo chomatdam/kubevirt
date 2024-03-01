@@ -21,8 +21,10 @@ package tests_test
 
 import (
 	"encoding/xml"
+	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"kubevirt.io/kubevirt/tests/libmigration"
@@ -49,6 +51,7 @@ import (
 
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
+	"kubevirt.io/kubevirt/tests/libnet"
 )
 
 var _ = Describe("[sig-compute]VSOCK", Serial, decorators.SigCompute, func() {
@@ -64,7 +67,7 @@ var _ = Describe("[sig-compute]VSOCK", Serial, decorators.SigCompute, func() {
 	Context("VM creation", func() {
 		DescribeTable("should expose a VSOCK device", func(useVirtioTransitional bool) {
 			By("Creating a VMI with VSOCK enabled")
-			vmi := tests.NewRandomFedoraVMI()
+			vmi := libvmi.NewFedora(libnet.WithMasqueradeNetworking()...)
 			vmi.Spec.Domain.Devices.UseVirtioTransitional = &useVirtioTransitional
 			vmi.Spec.Domain.Devices.AutoattachVSOCK = pointer.Bool(true)
 			vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
@@ -122,7 +125,7 @@ var _ = Describe("[sig-compute]VSOCK", Serial, decorators.SigCompute, func() {
 
 		It("should retain the CID for migration target", func() {
 			By("Creating a VMI with VSOCK enabled")
-			vmi := tests.NewRandomFedoraVMI()
+			vmi := libvmi.NewFedora(libnet.WithMasqueradeNetworking()...)
 			vmi.Spec.Domain.Devices.AutoattachVSOCK = pointer.Bool(true)
 			vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
 			Expect(vmi.Status.VSOCKCID).NotTo(BeNil())
@@ -137,7 +140,7 @@ var _ = Describe("[sig-compute]VSOCK", Serial, decorators.SigCompute, func() {
 
 			By("Creating a new VMI with VSOCK enabled on the same node")
 			node := vmi.Status.NodeName
-			vmi2 := tests.NewRandomFedoraVMI()
+			vmi2 := libvmi.NewFedora(libnet.WithMasqueradeNetworking()...)
 			vmi2.Spec.Domain.Devices.AutoattachVSOCK = pointer.Bool(true)
 			vmi2.Spec.Affinity = affinity(node)
 			vmi2 = tests.RunVMIAndExpectLaunch(vmi2, 60)
@@ -189,7 +192,7 @@ var _ = Describe("[sig-compute]VSOCK", Serial, decorators.SigCompute, func() {
 		Expect(libssh.SCPToVMI(vmi, privateKeyPath, flags.KubeVirtExampleGuestAgentPath, "/usr/bin/")).To(Succeed())
 
 		By("starting the guest agent binary")
-		Expect(tests.StartExampleGuestAgent(vmi, useTLS, 1234)).To(Succeed())
+		Expect(startExampleGuestAgent(vmi, useTLS, 1234)).To(Succeed())
 		time.Sleep(2 * time.Second)
 
 		virtClient := kubevirt.Client()
@@ -241,7 +244,7 @@ var _ = Describe("[sig-compute]VSOCK", Serial, decorators.SigCompute, func() {
 		virtClient := kubevirt.Client()
 
 		By("Creating a VMI with VSOCK enabled")
-		vmi := tests.NewRandomFedoraVMI()
+		vmi := libvmi.NewFedora(libnet.WithMasqueradeNetworking()...)
 		vmi.Spec.Domain.Devices.AutoattachVSOCK = pointer.Bool(true)
 		vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
 
@@ -254,7 +257,7 @@ var _ = Describe("[sig-compute]VSOCK", Serial, decorators.SigCompute, func() {
 		virtClient := kubevirt.Client()
 
 		By("Creating a VMI with VSOCK enabled")
-		vmi := tests.NewRandomFedoraVMI()
+		vmi := libvmi.NewFedora(libnet.WithMasqueradeNetworking()...)
 		vmi.Spec.Domain.Devices.AutoattachVSOCK = pointer.Bool(true)
 		vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
 
@@ -272,3 +275,22 @@ var _ = Describe("[sig-compute]VSOCK", Serial, decorators.SigCompute, func() {
 		})).NotTo(Succeed())
 	})
 })
+
+func startExampleGuestAgent(vmi *v1.VirtualMachineInstance, useTLS bool, port uint32) error {
+
+	serverArgs := fmt.Sprintf("--port %v", port)
+	if useTLS {
+		serverArgs = strings.Join([]string{serverArgs, "--use-tls"}, " ")
+	}
+
+	return console.ExpectBatch(vmi, []expect.Batcher{
+		&expect.BSnd{S: "chmod +x /usr/bin/example-guest-agent\n"},
+		&expect.BExp{R: console.PromptExpression},
+		&expect.BSnd{S: tests.EchoLastReturnValue},
+		&expect.BExp{R: console.ShellSuccess},
+		&expect.BSnd{S: fmt.Sprintf("/usr/bin/example-guest-agent %s 2>&1 &\n", serverArgs)},
+		&expect.BExp{R: console.PromptExpression},
+		&expect.BSnd{S: tests.EchoLastReturnValue},
+		&expect.BExp{R: console.ShellSuccess},
+	}, 60*time.Second)
+}

@@ -46,6 +46,8 @@ import (
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libpod"
 	"kubevirt.io/kubevirt/tests/libvmi"
 )
 
@@ -91,9 +93,9 @@ var _ = Describe("[rfe_id:609][sig-compute]VMIheadless", decorators.SigCompute, 
 				}
 				vmi = tests.RunVMIAndExpectLaunch(vmi, 30)
 
-				readyPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+				readyPod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
-				computeContainer := tests.GetComputeContainerOfPod(readyPod)
+				computeContainer := libpod.LookupComputeContainer(readyPod)
 
 				Expect(computeContainer.Resources.Requests.Memory().String()).To(Equal("100M"))
 			})
@@ -106,9 +108,9 @@ var _ = Describe("[rfe_id:609][sig-compute]VMIheadless", decorators.SigCompute, 
 				}
 				vmi = tests.RunVMIAndExpectLaunch(vmi, 30)
 
-				readyPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+				readyPod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
-				computeContainer := tests.GetComputeContainerOfPod(readyPod)
+				computeContainer := libpod.LookupComputeContainer(readyPod)
 
 				Expect(computeContainer.Resources.Requests.Memory().String()).ToNot(Equal("100M"))
 			})
@@ -119,13 +121,13 @@ var _ = Describe("[rfe_id:609][sig-compute]VMIheadless", decorators.SigCompute, 
 				vmi = tests.RunVMIAndExpectLaunch(vmi, 30)
 				normalVmi = tests.RunVMIAndExpectLaunch(normalVmi, 30)
 
-				readyPod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+				readyPod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
-				computeContainer := tests.GetComputeContainerOfPod(readyPod)
+				computeContainer := libpod.LookupComputeContainer(readyPod)
 
-				normalReadyPod, err := libvmi.GetPodByVirtualMachineInstance(normalVmi, testsuite.GetTestNamespace(vmi))
+				normalReadyPod, err := libpod.GetPodByVirtualMachineInstance(normalVmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
-				normalComputeContainer := tests.GetComputeContainerOfPod(normalReadyPod)
+				normalComputeContainer := libpod.LookupComputeContainer(normalReadyPod)
 
 				memDiff := normalComputeContainer.Resources.Requests.Memory()
 				memDiff.Sub(*computeContainer.Resources.Requests.Memory())
@@ -217,7 +219,7 @@ var _ = Describe("[rfe_id:609][sig-compute]VMIheadless", decorators.SigCompute, 
 				}
 
 				By("Running the VMI")
-				vmi = tests.NewRandomFedoraVMI()
+				vmi = libvmi.NewFedora(libnet.WithMasqueradeNetworking()...)
 				vmi = tests.RunVMIAndExpectLaunch(vmi, 30)
 
 				By("VMI has the guest agent connected condition")

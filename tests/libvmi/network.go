@@ -21,8 +21,6 @@ package libvmi
 
 import (
 	kvirtv1 "kubevirt.io/api/core/v1"
-
-	"kubevirt.io/kubevirt/tests/libnet"
 )
 
 // WithInterface adds a Domain Device Interface.
@@ -38,15 +36,6 @@ func WithInterface(iface kvirtv1.Interface) Option {
 func WithNetwork(network *kvirtv1.Network) Option {
 	return func(vmi *kvirtv1.VirtualMachineInstance) {
 		vmi.Spec.Networks = append(vmi.Spec.Networks, *network)
-	}
-}
-
-func WithMasqueradeNetworking(ports ...kvirtv1.Port) []Option {
-	networkData := libnet.CreateDefaultCloudInitNetworkData()
-	return []Option{
-		WithInterface(InterfaceDeviceWithMasqueradeBinding(ports...)),
-		WithNetwork(kvirtv1.DefaultPodNetwork()),
-		WithCloudInitNoCloudNetworkData(networkData),
 	}
 }
 
@@ -106,6 +95,15 @@ func InterfaceWithPasstBindingPlugin(ports ...kvirtv1.Port) kvirtv1.Interface {
 	}
 }
 
+// InterfaceWithMacvtapBindingPlugin returns an Interface named "default" with "macvtap" binding plugin.
+func InterfaceWithMacvtapBindingPlugin(name string) *kvirtv1.Interface {
+	const macvtapBindingName = "macvtap"
+	return &kvirtv1.Interface{
+		Name:    name,
+		Binding: &kvirtv1.PluginBinding{Name: macvtapBindingName},
+	}
+}
+
 func InterfaceWithBindingPlugin(name string, binding kvirtv1.PluginBinding, ports ...kvirtv1.Port) kvirtv1.Interface {
 	return kvirtv1.Interface{
 		Name:    name,
@@ -129,5 +127,19 @@ func MultusNetwork(name, nadName string) *kvirtv1.Network {
 				NetworkName: nadName,
 			},
 		},
+	}
+}
+
+// WithHostname sets the hostname parameter.
+func WithHostname(hostname string) Option {
+	return func(vmi *kvirtv1.VirtualMachineInstance) {
+		vmi.Spec.Hostname = hostname
+	}
+}
+
+// WithSubdomain sets the subdomain parameter.
+func WithSubdomain(subdomain string) Option {
+	return func(vmi *kvirtv1.VirtualMachineInstance) {
+		vmi.Spec.Subdomain = subdomain
 	}
 }

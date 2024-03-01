@@ -124,6 +124,7 @@ type VirtualMachineInstanceSpec struct {
 	// Grace period observed after signalling a VirtualMachineInstance to stop after which the VirtualMachineInstance is force terminated.
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 	// List of volumes that can be mounted by disks belonging to the vmi.
+	// +kubebuilder:validation:MaxItems:=256
 	Volumes []Volume `json:"volumes,omitempty"`
 	// Periodic probe of VirtualMachineInstance liveness.
 	// VirtualmachineInstances will be stopped if the probe fails.
@@ -147,6 +148,7 @@ type VirtualMachineInstanceSpec struct {
 	// +optional
 	Subdomain string `json:"subdomain,omitempty"`
 	// List of networks that can be attached to a vm's virtual interface.
+	// +kubebuilder:validation:MaxItems:=256
 	Networks []Network `json:"networks,omitempty"`
 	// Set DNS policy for the pod.
 	// Defaults to "ClusterFirst".
@@ -164,6 +166,7 @@ type VirtualMachineInstanceSpec struct {
 	// Specifies a set of public keys to inject into the vm guest
 	// +listType=atomic
 	// +optional
+	// +kubebuilder:validation:MaxItems:=256
 	AccessCredentials []AccessCredential `json:"accessCredentials,omitempty"`
 	// Specifies the architecture of the vm guest you are attempting to run. Defaults to the compiled architecture of the KubeVirt components
 	Architecture string `json:"architecture,omitempty"`
@@ -705,8 +708,11 @@ type VirtualMachineInstanceMigrationState struct {
 	TargetPod string `json:"targetPod,omitempty"`
 	// The UID of the target attachment pod for hotplug volumes
 	TargetAttachmentPodUID types.UID `json:"targetAttachmentPodUID,omitempty"`
+
 	// The source node that the VMI originated on
 	SourceNode string `json:"sourceNode,omitempty"`
+	SourcePod  string `json:"sourcePod,omitempty"`
+
 	// Indicates the migration completed
 	Completed bool `json:"completed,omitempty"`
 	// Indicates that the migration failed
@@ -715,6 +721,8 @@ type VirtualMachineInstanceMigrationState struct {
 	AbortRequested bool `json:"abortRequested,omitempty"`
 	// Indicates the final status of the live migration abortion
 	AbortStatus MigrationAbortStatus `json:"abortStatus,omitempty"`
+	// Contains the reason why the migration failed
+	FailureReason string `json:"failureReason,omitempty"`
 	// The VirtualMachineInstanceMigration object associated with this migration
 	MigrationUID types.UID `json:"migrationUid,omitempty"`
 	// Lets us know if the vmi is currently running pre or post copy migration
@@ -966,7 +974,7 @@ const (
 	// SEVESLabel marks the node as capable of running workloads with SEV-ES
 	SEVESLabel string = "kubevirt.io/sev-es"
 
-	// KSMEnabledLabel marks the node as KSM enabled
+	// KSMEnabledLabel marks the node as KSM-handling enabled
 	KSMEnabledLabel string = "kubevirt.io/ksm-enabled"
 
 	// KSMHandlerManagedAnnotation is an annotation used to mark the nodes where the virt-handler has enabled the ksm
@@ -1487,9 +1495,6 @@ type VirtualMachineSpec struct {
 	// dataVolumeTemplates is a list of dataVolumes that the VirtualMachineInstance template can reference.
 	// DataVolumes in this list are dynamically created for the VirtualMachine and are tied to the VirtualMachine's life-cycle.
 	DataVolumeTemplates []DataVolumeTemplateSpec `json:"dataVolumeTemplates,omitempty"`
-
-	// LiveUpdateFeatures references a configuration of hotpluggable resources
-	LiveUpdateFeatures *LiveUpdateFeatures `json:"liveUpdateFeatures,omitempty" optional:"true"`
 }
 
 // StateChangeRequestType represents the existing state change requests that are possible
@@ -1666,6 +1671,9 @@ const (
 
 	// VirtualMachineInitialized means the virtual machine object has been seen by the VM controller
 	VirtualMachineInitialized VirtualMachineConditionType = "Initialized"
+
+	// VirtualMachineRestartRequired is added when changes made to the VM can't be live-propagated to the VMI
+	VirtualMachineRestartRequired VirtualMachineConditionType = "RestartRequired"
 )
 
 type HostDiskType string
@@ -2229,8 +2237,8 @@ type VirtualMachineInstanceFileSystemList struct {
 
 // VirtualMachineInstanceFileSystemDisk represents the guest os FS disks
 type VirtualMachineInstanceFileSystemDisk struct {
-	Serial  string `json:"serial"`
-	BusType string `json:"bus-type"`
+	Serial  string `json:"serial,omitempty"`
+	BusType string `json:"busType"`
 }
 
 // VirtualMachineInstanceFileSystem represents guest os disk
@@ -2423,7 +2431,21 @@ type KubeVirtConfiguration struct {
 	AutoCPULimitNamespaceLabelSelector *metav1.LabelSelector `json:"autoCPULimitNamespaceLabelSelector,omitempty"`
 	// LiveUpdateConfiguration holds defaults for live update features
 	LiveUpdateConfiguration *LiveUpdateConfiguration `json:"liveUpdateConfiguration,omitempty"`
+
+	// VMRolloutStrategy defines how changes to a VM object propagate to its VMI
+	// +nullable
+	// +kubebuilder:validation:Enum=Stage;LiveUpdate
+	VMRolloutStrategy *VMRolloutStrategy `json:"vmRolloutStrategy,omitempty"`
 }
+
+type VMRolloutStrategy string
+
+const (
+	// VMRolloutStrategyStage is the default strategy. It means changes to VM objects will be staged until the next VM reboot
+	VMRolloutStrategyStage VMRolloutStrategy = "Stage"
+	// VMRolloutStrategyLiveUpdate means changes to VM objects will be propagated to their VMI when possible
+	VMRolloutStrategyLiveUpdate VMRolloutStrategy = "LiveUpdate"
+)
 
 type ArchConfiguration struct {
 	Amd64               *ArchSpecificConfiguration `json:"amd64,omitempty"`
@@ -2748,6 +2770,9 @@ type InterfaceBindingPlugin struct {
 	// The standard domain attachment can be used instead or in addition to the sidecarImage.
 	// version: 1alphav1
 	DomainAttachmentType DomainAttachmentType `json:"domainAttachmentType,omitempty"`
+	// Migration means the VM using the plugin can be safely migrated
+	// version: 1alphav1
+	Migration *InterfaceBindingMigration `json:"migration,omitempty"`
 }
 
 type DomainAttachmentType string
@@ -2756,6 +2781,19 @@ const (
 	// Tap domain attachment type is a generic way to bind ethernet connection into guests using tap device
 	// https://libvirt.org/formatdomain.html#generic-ethernet-connection.
 	Tap DomainAttachmentType = "tap"
+)
+
+type InterfaceBindingMigration struct {
+	// Method defines a pre-defined migration methodology
+	// version: 1alphav1
+	Method MigrationMethod `json:"method,omitempty"`
+}
+
+type MigrationMethod string
+
+const (
+	// LinkRefresh method will invoke link down -> link up interface to give a chance to the guest to request new IP address and routes from DHCP
+	LinkRefresh MigrationMethod = "link-refresh"
 )
 
 // GuestAgentPing configures the guest-agent based ping probe
@@ -2875,19 +2913,6 @@ func (p PreferenceMatcher) GetName() string {
 
 func (p PreferenceMatcher) GetRevisionName() string {
 	return p.RevisionName
-}
-
-type LiveUpdateFeatures struct {
-	// LiveUpdateCPU holds hotplug configuration for the CPU resource.
-	// Empty struct indicates that default will be used for maxSockets.
-	// Default is specified on cluster level.
-	// Absence of the struct means opt-out from CPU hotplug functionality.
-	CPU *LiveUpdateCPU `json:"cpu,omitempty" optional:"true"`
-	// Affinity allows live updating the virtual machines node affinity
-	Affinity *LiveUpdateAffinity `json:"affinity,omitempty" optional:"true"`
-	// MemoryLiveUpdateConfiguration defines the live update memory features for the VirtualMachine
-	// +optional
-	Memory *LiveUpdateMemory `json:"memory,omitempty"`
 }
 
 type LiveUpdateAffinity struct{}

@@ -157,13 +157,18 @@ type FSFreeze struct {
 	Status string
 }
 
+type FSDisk struct {
+	Serial  string
+	BusType string
+}
+
 type Filesystem struct {
 	Name       string
 	Mountpoint string
 	Type       string
 	UsedBytes  int
 	TotalBytes int
-	Disk       []v1.VirtualMachineInstanceFileSystemDisk
+	Disk       []FSDisk
 }
 
 type User struct {
@@ -778,6 +783,7 @@ type ConsoleSource struct {
 // BEGIN Inteface -----------------------------
 
 type Interface struct {
+	XMLName             xml.Name               `xml:"interface"`
 	Address             *Address               `xml:"address,omitempty"`
 	Type                string                 `xml:"type,attr"`
 	TrustGuestRxFilters string                 `xml:"trustGuestRxFilters,attr,omitempty"`

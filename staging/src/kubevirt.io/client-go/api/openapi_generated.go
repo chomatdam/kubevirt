@@ -391,6 +391,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"kubevirt.io/api/core/v1.InstancetypeMatcher":                                                schema_kubevirtio_api_core_v1_InstancetypeMatcher(ref),
 		"kubevirt.io/api/core/v1.Interface":                                                          schema_kubevirtio_api_core_v1_Interface(ref),
 		"kubevirt.io/api/core/v1.InterfaceBindingMethod":                                             schema_kubevirtio_api_core_v1_InterfaceBindingMethod(ref),
+		"kubevirt.io/api/core/v1.InterfaceBindingMigration":                                          schema_kubevirtio_api_core_v1_InterfaceBindingMigration(ref),
 		"kubevirt.io/api/core/v1.InterfaceBindingPlugin":                                             schema_kubevirtio_api_core_v1_InterfaceBindingPlugin(ref),
 		"kubevirt.io/api/core/v1.InterfaceBridge":                                                    schema_kubevirtio_api_core_v1_InterfaceBridge(ref),
 		"kubevirt.io/api/core/v1.InterfaceMacvtap":                                                   schema_kubevirtio_api_core_v1_InterfaceMacvtap(ref),
@@ -417,7 +418,6 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"kubevirt.io/api/core/v1.LiveUpdateAffinity":                                                 schema_kubevirtio_api_core_v1_LiveUpdateAffinity(ref),
 		"kubevirt.io/api/core/v1.LiveUpdateCPU":                                                      schema_kubevirtio_api_core_v1_LiveUpdateCPU(ref),
 		"kubevirt.io/api/core/v1.LiveUpdateConfiguration":                                            schema_kubevirtio_api_core_v1_LiveUpdateConfiguration(ref),
-		"kubevirt.io/api/core/v1.LiveUpdateFeatures":                                                 schema_kubevirtio_api_core_v1_LiveUpdateFeatures(ref),
 		"kubevirt.io/api/core/v1.LiveUpdateMemory":                                                   schema_kubevirtio_api_core_v1_LiveUpdateMemory(ref),
 		"kubevirt.io/api/core/v1.LogVerbosity":                                                       schema_kubevirtio_api_core_v1_LogVerbosity(ref),
 		"kubevirt.io/api/core/v1.LunTarget":                                                          schema_kubevirtio_api_core_v1_LunTarget(ref),
@@ -18688,6 +18688,25 @@ func schema_kubevirtio_api_core_v1_InterfaceBindingMethod(ref common.ReferenceCa
 	}
 }
 
+func schema_kubevirtio_api_core_v1_InterfaceBindingMigration(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"method": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Method defines a pre-defined migration methodology version: 1alphav1",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func schema_kubevirtio_api_core_v1_InterfaceBindingPlugin(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -18715,9 +18734,17 @@ func schema_kubevirtio_api_core_v1_InterfaceBindingPlugin(ref common.ReferenceCa
 							Format:      "",
 						},
 					},
+					"migration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Migration means the VM using the plugin can be safely migrated version: 1alphav1",
+							Ref:         ref("kubevirt.io/api/core/v1.InterfaceBindingMigration"),
+						},
+					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"kubevirt.io/api/core/v1.InterfaceBindingMigration"},
 	}
 }
 
@@ -19318,6 +19345,13 @@ func schema_kubevirtio_api_core_v1_KubeVirtConfiguration(ref common.ReferenceCal
 							Ref:         ref("kubevirt.io/api/core/v1.LiveUpdateConfiguration"),
 						},
 					},
+					"vmRolloutStrategy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "VMRolloutStrategy defines how changes to a VM object propagate to its VMI",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
@@ -19813,38 +19847,6 @@ func schema_kubevirtio_api_core_v1_LiveUpdateConfiguration(ref common.ReferenceC
 		},
 		Dependencies: []string{
 			"k8s.io/apimachinery/pkg/api/resource.Quantity"},
-	}
-}
-
-func schema_kubevirtio_api_core_v1_LiveUpdateFeatures(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"cpu": {
-						SchemaProps: spec.SchemaProps{
-							Description: "LiveUpdateCPU holds hotplug configuration for the CPU resource. Empty struct indicates that default will be used for maxSockets. Default is specified on cluster level. Absence of the struct means opt-out from CPU hotplug functionality.",
-							Ref:         ref("kubevirt.io/api/core/v1.LiveUpdateCPU"),
-						},
-					},
-					"affinity": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Affinity allows live updating the virtual machines node affinity",
-							Ref:         ref("kubevirt.io/api/core/v1.LiveUpdateAffinity"),
-						},
-					},
-					"memory": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MemoryLiveUpdateConfiguration defines the live update memory features for the VirtualMachine",
-							Ref:         ref("kubevirt.io/api/core/v1.LiveUpdateMemory"),
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"kubevirt.io/api/core/v1.LiveUpdateAffinity", "kubevirt.io/api/core/v1.LiveUpdateCPU", "kubevirt.io/api/core/v1.LiveUpdateMemory"},
 	}
 }
 
@@ -22866,12 +22868,11 @@ func schema_kubevirtio_api_core_v1_VirtualMachineInstanceFileSystemDisk(ref comm
 				Properties: map[string]spec.Schema{
 					"serial": {
 						SchemaProps: spec.SchemaProps{
-							Default: "",
-							Type:    []string{"string"},
-							Format:  "",
+							Type:   []string{"string"},
+							Format: "",
 						},
 					},
-					"bus-type": {
+					"busType": {
 						SchemaProps: spec.SchemaProps{
 							Default: "",
 							Type:    []string{"string"},
@@ -22879,7 +22880,7 @@ func schema_kubevirtio_api_core_v1_VirtualMachineInstanceFileSystemDisk(ref comm
 						},
 					},
 				},
-				Required: []string{"serial", "bus-type"},
+				Required: []string{"busType"},
 			},
 		},
 	}
@@ -23546,6 +23547,12 @@ func schema_kubevirtio_api_core_v1_VirtualMachineInstanceMigrationState(ref comm
 							Format:      "",
 						},
 					},
+					"sourcePod": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
 					"completed": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Indicates the migration completed",
@@ -23570,6 +23577,13 @@ func schema_kubevirtio_api_core_v1_VirtualMachineInstanceMigrationState(ref comm
 					"abortStatus": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Indicates the final status of the live migration abortion",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"failureReason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Contains the reason why the migration failed",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -24839,18 +24853,12 @@ func schema_kubevirtio_api_core_v1_VirtualMachineSpec(ref common.ReferenceCallba
 							},
 						},
 					},
-					"liveUpdateFeatures": {
-						SchemaProps: spec.SchemaProps{
-							Description: "LiveUpdateFeatures references a configuration of hotpluggable resources",
-							Ref:         ref("kubevirt.io/api/core/v1.LiveUpdateFeatures"),
-						},
-					},
 				},
 				Required: []string{"template"},
 			},
 		},
 		Dependencies: []string{
-			"kubevirt.io/api/core/v1.DataVolumeTemplateSpec", "kubevirt.io/api/core/v1.InstancetypeMatcher", "kubevirt.io/api/core/v1.LiveUpdateFeatures", "kubevirt.io/api/core/v1.PreferenceMatcher", "kubevirt.io/api/core/v1.VirtualMachineInstanceTemplateSpec"},
+			"kubevirt.io/api/core/v1.DataVolumeTemplateSpec", "kubevirt.io/api/core/v1.InstancetypeMatcher", "kubevirt.io/api/core/v1.PreferenceMatcher", "kubevirt.io/api/core/v1.VirtualMachineInstanceTemplateSpec"},
 	}
 }
 

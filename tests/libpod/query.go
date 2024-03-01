@@ -24,19 +24,18 @@ import (
 	"fmt"
 	"sort"
 
+	v1 "kubevirt.io/api/core/v1"
+
+	"kubevirt.io/kubevirt/pkg/controller"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+
 	"kubevirt.io/client-go/kubecli"
 
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func GetRunningPodByLabel(
-	virtCli kubecli.KubevirtClient,
-	label string,
-	labelType string,
-	namespace string,
-	node string) (*k8sv1.Pod, error) {
-
+func GetRunningPodByLabel(virtCli kubecli.KubevirtClient, label, labelType, namespace, node string) (*k8sv1.Pod, error) {
 	labelSelector := fmt.Sprintf("%s=%s", labelType, label)
 	var fieldSelector string
 	if node != "" {
@@ -60,4 +59,28 @@ func GetRunningPodByLabel(
 		sort.Sort(sort.Reverse(PodsByCreationTimestamp(pods.Items)))
 		return &pods.Items[0], nil
 	}
+}
+
+func GetPodByVirtualMachineInstance(vmi *v1.VirtualMachineInstance, namespace string) (*k8sv1.Pod, error) {
+	virtCli := kubevirt.Client()
+
+	pods, err := virtCli.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	var controlledPod *k8sv1.Pod
+	for podIndex := range pods.Items {
+		pod := &pods.Items[podIndex]
+		if controller.IsControlledBy(pod, vmi) {
+			controlledPod = pod
+			break
+		}
+	}
+
+	if controlledPod == nil {
+		return nil, fmt.Errorf("no controlled pod was found for VMI")
+	}
+
+	return controlledPod, nil
 }

@@ -40,6 +40,7 @@ import (
 	"kubevirt.io/kubevirt/tests/framework/checks"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libnet/cloudinit"
 	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/libwait"
 	"kubevirt.io/kubevirt/tests/testsuite"
@@ -157,7 +158,8 @@ var _ = SIGDescribe("bridge nic-hotplug", func() {
 			const ip2 = "10.1.1.2"
 
 			By("Configuring static IP address on the hotplugged interface inside the guest")
-			Expect(configInterface(hotPluggedVMI, vmIfaceName, ip1+subnetMask)).To(Succeed())
+			Expect(libnet.AddIPAddress(hotPluggedVMI, vmIfaceName, ip1+subnetMask)).To(Succeed())
+			Expect(libnet.SetInterfaceUp(hotPluggedVMI, vmIfaceName)).To(Succeed())
 
 			By("creating another VM connected to the same secondary network")
 			net := v1.Network{
@@ -181,7 +183,7 @@ var _ = SIGDescribe("bridge nic-hotplug", func() {
 				libvmi.WithNetwork(v1.DefaultPodNetwork()),
 				libvmi.WithInterface(iface),
 				libvmi.WithNetwork(&net),
-				libvmi.WithCloudInitNoCloudNetworkData(cloudInitNetworkDataWithStaticIPsByDevice("eth1", ip2+subnetMask)),
+				libvmi.WithCloudInitNoCloudNetworkData(cloudinit.CreateNetworkDataWithStaticIPsByIface("eth1", ip2+subnetMask)),
 				libvmi.WithNodeAffinityFor(hotPluggedVMI.Status.NodeName))
 			anotherVmi, err := kubevirt.Client().VirtualMachineInstance(testsuite.GetTestNamespace(anotherVmi)).Create(context.Background(), anotherVmi)
 			ExpectWithOffset(1, err).ToNot(HaveOccurred())
@@ -256,7 +258,7 @@ var _ = SIGDescribe("bridge nic-hotunplug", func() {
 
 			By("running a VM")
 			opts := append(
-				libvmi.WithMasqueradeNetworking(),
+				libnet.WithMasqueradeNetworking(),
 				libvmi.WithNetwork(libvmi.MultusNetwork(linuxBridgeNetworkName1, nadName)),
 				libvmi.WithNetwork(libvmi.MultusNetwork(linuxBridgeNetworkName2, nadName)),
 				libvmi.WithInterface(libvmi.InterfaceDeviceWithBridgeBinding(linuxBridgeNetworkName1)),
@@ -315,7 +317,7 @@ var _ = SIGDescribe("bridge nic-hotunplug", func() {
 		BeforeEach(func() {
 			By("create stopped VM")
 			opts := append(
-				libvmi.WithMasqueradeNetworking(),
+				libnet.WithMasqueradeNetworking(),
 				libvmi.WithNetwork(libvmi.MultusNetwork(linuxBridgeNetworkName1, nadName)),
 				libvmi.WithNetwork(libvmi.MultusNetwork(linuxBridgeNetworkName2, nadName)),
 				libvmi.WithInterface(libvmi.InterfaceDeviceWithBridgeBinding(linuxBridgeNetworkName1)),

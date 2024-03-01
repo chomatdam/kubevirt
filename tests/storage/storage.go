@@ -39,8 +39,6 @@ import (
 	"kubevirt.io/kubevirt/tests/framework/matcher"
 	storageframework "kubevirt.io/kubevirt/tests/framework/storage"
 
-	"kubevirt.io/kubevirt/tests/util"
-
 	expect "github.com/google/goexpect"
 	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
@@ -68,6 +66,7 @@ import (
 	"kubevirt.io/kubevirt/tests/libstorage"
 	"kubevirt.io/kubevirt/tests/libwait"
 	"kubevirt.io/kubevirt/tests/testsuite"
+	"kubevirt.io/kubevirt/tests/util"
 	"kubevirt.io/kubevirt/tests/watcher"
 )
 
@@ -96,7 +95,8 @@ var _ = SIGDescribe("Storage", func() {
 
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
-		tests.SetupAlpineHostPath()
+		libstorage.CreateHostPathPv("alpine-host-path", testsuite.GetTestNamespace(nil), testsuite.HostPathAlpine)
+		libstorage.CreateHostPathPVC("alpine-host-path", testsuite.GetTestNamespace(nil), "1Gi")
 	})
 
 	Describe("Starting a VirtualMachineInstance", func() {
@@ -356,7 +356,7 @@ var _ = SIGDescribe("Storage", func() {
 
 				// Start the VirtualMachineInstance with the empty disk attached
 				vmi = libvmi.NewAlpineWithTestTooling(
-					libvmi.WithMasqueradeNetworking()...,
+					libnet.WithMasqueradeNetworking()...,
 				)
 				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
 					Name:   "emptydisk1",
@@ -417,7 +417,7 @@ var _ = SIGDescribe("Storage", func() {
 					if pvName != "" && pvName != tests.DiskAlpineHostPath {
 						// PVs can't be reused
 						By("Deleting PV and PVC")
-						tests.DeletePvAndPvc(pvName)
+						deletePvAndPvc(pvName)
 					}
 				})
 
@@ -677,7 +677,7 @@ var _ = SIGDescribe("Storage", func() {
 						diskName = fmt.Sprintf("disk-%s.img", uuid.NewString())
 						diskPath = filepath.Join(hostDiskDir, diskName)
 						// create a disk image before test
-						job := tests.CreateHostDiskImage(diskPath)
+						job := CreateDiskOnHost(diskPath)
 						job, err = virtClient.CoreV1().Pods(testsuite.NamespacePrivileged).Create(context.Background(), job, metav1.CreateOptions{})
 						Expect(err).ToNot(HaveOccurred())
 
@@ -1035,7 +1035,7 @@ var _ = SIGDescribe("Storage", func() {
 			})
 
 			Context("With a USB device", func() {
-				It("should successfully start and have the USB storage device attached", func() {
+				It("[test_id:9797]should successfully start and have the USB storage device attached", func() {
 					vmi = libvmi.NewAlpine(
 						libvmi.WithEmptyDisk("emptydisk1", v1.DiskBusUSB, resource.MustParse("128Mi")),
 					)
@@ -1436,4 +1436,18 @@ func checkResultShellCommandOnVmi(vmi *v1.VirtualMachineInstance, cmd, output st
 	ExpectWithOffset(1, err).ToNot(HaveOccurred())
 	ExpectWithOffset(1, res).ToNot(BeEmpty())
 	ExpectWithOffset(1, res[0].Output).To(ContainSubstring(output))
+}
+
+func deletePvAndPvc(name string) {
+	virtCli := kubevirt.Client()
+
+	err := virtCli.CoreV1().PersistentVolumes().Delete(context.Background(), name, metav1.DeleteOptions{})
+	if !errors.IsNotFound(err) {
+		util.PanicOnError(err)
+	}
+
+	err = virtCli.CoreV1().PersistentVolumeClaims(testsuite.GetTestNamespace(nil)).Delete(context.Background(), name, metav1.DeleteOptions{})
+	if !errors.IsNotFound(err) {
+		util.PanicOnError(err)
+	}
 }

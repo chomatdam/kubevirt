@@ -23,6 +23,8 @@ import (
 
 	"kubevirt.io/kubevirt/tests/flags"
 	"kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libmonitoring"
+	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/util"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -355,7 +357,7 @@ func CreateNodeAffinityRuleToMigrateFromSourceToTargetAndBack(sourceNode *k8sv1.
 		},
 	}, nil
 }
-func ConfirmVMIPostMigrationFailed(vmi *v1.VirtualMachineInstance, migrationUID string) {
+func ConfirmVMIPostMigrationFailed(vmi *v1.VirtualMachineInstance, migrationUID string) *v1.VirtualMachineInstance {
 	virtClient := kubevirt.Client()
 	By("Retrieving the VMI post migration")
 	vmi, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
@@ -374,6 +376,8 @@ func ConfirmVMIPostMigrationFailed(vmi *v1.VirtualMachineInstance, migrationUID 
 
 	By("Verifying the VMI's is in the running state")
 	Expect(vmi.Status.Phase).To(Equal(v1.Running))
+
+	return vmi
 }
 
 func ConfirmVMIPostMigrationAborted(vmi *v1.VirtualMachineInstance, migrationUID string, timeout int) *v1.VirtualMachineInstance {
@@ -527,7 +531,7 @@ func RunMigrationAndCollectMigrationMetrics(vmi *v1.VirtualMachineInstance, migr
 	}
 
 	By("Waiting until the Migration Completes")
-	ip := libinfra.GetSupportedIP(metricsIPs, family)
+	ip := libnet.GetIP(metricsIPs, family)
 
 	_ = RunMigration(virtClient, migration)
 
@@ -537,6 +541,7 @@ func RunMigrationAndCollectMigrationMetrics(vmi *v1.VirtualMachineInstance, migr
 		keys := libinfra.GetKeysFromMetrics(metrics)
 		for _, key := range keys {
 			value := metrics[key]
+
 			if value == 0 {
 				return fmt.Errorf("metric value for %s is not expected to be zero", key)
 			}
@@ -544,9 +549,8 @@ func RunMigrationAndCollectMigrationMetrics(vmi *v1.VirtualMachineInstance, migr
 		return nil
 	}
 
-	getKubevirtVMMetricsFunc := tests.GetKubevirtVMMetricsFunc(&virtClient, pod)
 	Eventually(func() error {
-		out := getKubevirtVMMetricsFunc(ip)
+		out := libmonitoring.GetKubevirtVMMetrics(pod, ip)
 		for _, metricName := range migrationMetrics {
 			lines := libinfra.TakeMetricsWithPrefix(out, metricName)
 			metrics, err := libinfra.ParseMetricsToMap(lines)

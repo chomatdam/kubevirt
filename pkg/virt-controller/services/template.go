@@ -51,6 +51,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/net/dns"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-controller/network"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
@@ -96,9 +97,6 @@ const NFD_CPU_MODEL_PREFIX = "cpu-model.node.kubevirt.io/"
 const NFD_CPU_FEATURE_PREFIX = "cpu-feature.node.kubevirt.io/"
 const NFD_KVM_INFO_PREFIX = "hyperv.node.kubevirt.io/"
 const IntelVendorName = "Intel"
-
-const MULTUS_RESOURCE_NAME_ANNOTATION = "k8s.v1.cni.cncf.io/resourceName"
-const MULTUS_DEFAULT_NETWORK_CNI_ANNOTATION = "v1.multus-cni.io/default-network"
 
 // Istio list of virtual interfaces whose inbound traffic (from VM) will be treated as outbound traffic in envoy
 const ISTIO_KUBEVIRT_ANNOTATION = "traffic.sidecar.istio.io/kubevirtInterfaces"
@@ -266,9 +264,9 @@ func (t *templateService) RenderMigrationManifest(vmi *v1.VirtualMachineInstance
 		return nil, err
 	}
 
-	if namescheme.PodHasOrdinalInterfaceName(NonDefaultMultusNetworksIndexedByIfaceName(pod)) {
+	if namescheme.PodHasOrdinalInterfaceName(network.NonDefaultMultusNetworksIndexedByIfaceName(pod)) {
 		ordinalNameScheme := namescheme.CreateOrdinalNetworkNameScheme(vmi.Spec.Networks)
-		multusNetworksAnnotation, err := GenerateMultusCNIAnnotationFromNameScheme(
+		multusNetworksAnnotation, err := network.GenerateMultusCNIAnnotationFromNameScheme(
 			vmi.Namespace, vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, ordinalNameScheme, t.clusterConfig)
 		if err != nil {
 			return nil, err
@@ -343,7 +341,7 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 	gracePeriodSeconds = gracePeriodSeconds + int64(15)
 	gracePeriodKillAfter := gracePeriodSeconds + int64(15)
 
-	networkToResourceMap, err := getNetworkToResourceMap(t.virtClient, vmi)
+	networkToResourceMap, err := network.GetNetworkToResourceMap(t.virtClient, vmi)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +599,7 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 		},
 	}
 
-	alignPodMultiCategorySecurity(&pod, vmi, t.clusterConfig.GetSELinuxLauncherType(), t.clusterConfig.DockerSELinuxMCSWorkaroundEnabled(), t.clusterConfig.CustomSELinuxPolicyDisabled())
+	alignPodMultiCategorySecurity(&pod, t.clusterConfig.GetSELinuxLauncherType(), t.clusterConfig.DockerSELinuxMCSWorkaroundEnabled())
 
 	// If we have a runtime class specified, use it, otherwise don't set a runtimeClassName
 	runtimeClassName := t.clusterConfig.GetDefaultRuntimeClass()
@@ -1182,22 +1180,6 @@ func HaveContainerDiskVolume(volumes []v1.Volume) bool {
 	return false
 }
 
-func getResourceNameForNetwork(network *networkv1.NetworkAttachmentDefinition) string {
-	resourceName, ok := network.Annotations[MULTUS_RESOURCE_NAME_ANNOTATION]
-	if ok {
-		return resourceName
-	}
-	return "" // meaning the network is not served by resources
-}
-
-func getNamespaceAndNetworkName(namespace string, fullNetworkName string) (string, string) {
-	if strings.Contains(fullNetworkName, "/") {
-		res := strings.SplitN(fullNetworkName, "/", 2)
-		return res[0], res[1]
-	}
-	return precond.MustNotBeEmpty(namespace), fullNetworkName
-}
-
 type templateServiceOption func(*templateService)
 
 func NewTemplateService(launcherImage string,
@@ -1276,14 +1258,7 @@ func wrapGuestAgentPingWithVirtProbe(vmi *v1.VirtualMachineInstance, probe *k8sv
 	return
 }
 
-func alignPodMultiCategorySecurity(pod *k8sv1.Pod, vmi *v1.VirtualMachineInstance, selinuxType string, dockerSELinuxMCSWorkaround bool, customPolicyDisabled bool) {
-	if selinuxType == "" {
-		if !customPolicyDisabled && util.IsPasstVMI(&vmi.Spec) {
-			// If no SELinux type was specified, use our custom type for VMIs that need it
-			selinuxType = customSELinuxType
-		}
-	}
-
+func alignPodMultiCategorySecurity(pod *k8sv1.Pod, selinuxType string, dockerSELinuxMCSWorkaround bool) {
 	if selinuxType == "" && !dockerSELinuxMCSWorkaround {
 		// No SELinux type and no docker workaround, nothing to do
 		return
@@ -1351,7 +1326,7 @@ func generatePodAnnotations(vmi *v1.VirtualMachineInstance, config *virtconfig.C
 		return iface.State != v1.InterfaceStateAbsent
 	})
 	nonAbsentNets := vmispec.FilterNetworksByInterfaces(vmi.Spec.Networks, nonAbsentIfaces)
-	multusAnnotation, err := GenerateMultusCNIAnnotation(vmi.Namespace, nonAbsentIfaces, nonAbsentNets, config)
+	multusAnnotation, err := network.GenerateMultusCNIAnnotation(vmi.Namespace, nonAbsentIfaces, nonAbsentNets, config)
 	if err != nil {
 		return nil, err
 	}
@@ -1360,7 +1335,7 @@ func generatePodAnnotations(vmi *v1.VirtualMachineInstance, config *virtconfig.C
 	}
 
 	if multusDefaultNetwork := lookupMultusDefaultNetworkName(vmi.Spec.Networks); multusDefaultNetwork != "" {
-		annotationsSet[MULTUS_DEFAULT_NETWORK_CNI_ANNOTATION] = multusDefaultNetwork
+		annotationsSet[network.MULTUS_DEFAULT_NETWORK_CNI_ANNOTATION] = multusDefaultNetwork
 	}
 
 	if HaveMasqueradeInterface(vmi.Spec.Domain.Devices.Interfaces) {
