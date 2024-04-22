@@ -681,6 +681,9 @@ func newSidecarContainerRenderer(sidecarName string, vmiSpec *v1.VirtualMachineI
 	if requestedHookSidecar.PVC != nil {
 		mounts = append(mounts, pvcVolumeMount(*requestedHookSidecar.PVC))
 	}
+	if len(requestedHookSidecar.VolumeMounts) > 0 {
+		mounts = append(mounts, requestedHookSidecar.VolumeMounts...)
+	}
 	sidecarOpts = append(sidecarOpts, WithVolumeMounts(mounts...))
 
 	if util.IsNonRootVMI(vmiSpec) {
