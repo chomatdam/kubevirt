@@ -686,9 +686,13 @@ func newSidecarContainerRenderer(sidecarName string, vmiSpec *v1.VirtualMachineI
 	}
 	sidecarOpts = append(sidecarOpts, WithVolumeMounts(mounts...))
 
+	if len(requestedHookSidecar.Ports) > 0 {
+		sidecarOpts = append(sidecarOpts, WithSidecarPorts(requestedHookSidecar.Ports...))
+	}
+
 	if util.IsNonRootVMI(vmiSpec) {
 		sidecarOpts = append(sidecarOpts, WithNonRoot(userId))
-		sidecarOpts = append(sidecarOpts, WithDropALLCapabilities())
+		//sidecarOpts = append(sidecarOpts, WithDropALLCapabilities())
 	}
 	if requestedHookSidecar.Image == "" {
 		requestedHookSidecar.Image = os.Getenv(operatorutil.SidecarShimImageEnvName)

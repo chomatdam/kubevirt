@@ -129,6 +129,12 @@ func WithVolumeMounts(mounts ...k8sv1.VolumeMount) Option {
 	}
 }
 
+func WithSidecarPorts(ports ...k8sv1.ContainerPort) Option {
+	return func(renderer *ContainerSpecRenderer) {
+		renderer.ports = ports
+	}
+}
+
 func WithResourceRequirements(resources k8sv1.ResourceRequirements) Option {
 	return func(renderer *ContainerSpecRenderer) {
 		renderer.resources = resources
