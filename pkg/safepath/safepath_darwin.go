@@ -1,4 +1,4 @@
-//go:build linux
+//go:build darwin
 
 package safepath
 
@@ -70,7 +70,7 @@ func openat(dirfd int, path string) (fd int, err error) {
 	if err := isSingleElement(path); err != nil {
 		return -1, err
 	}
-	return unix.Openat(dirfd, path, unix.O_NOFOLLOW|unix.O_PATH, 0)
+	return unix.Openat(dirfd, path, unix.O_SYMLINK|unix.O_NOFOLLOW, 0)
 }
 
 func unlinkat(dirfd int, path string, flags int) error {
@@ -84,22 +84,31 @@ func touchat(dirfd int, path string, mode uint32) (fd int, err error) {
 	if err := isSingleElement(path); err != nil {
 		return -1, err
 	}
-	return unix.Openat(dirfd, path, unix.O_NOFOLLOW|syscall.O_CREAT|syscall.O_EXCL, mode)
+	return unix.Openat(dirfd, path, unix.O_SYMLINK|syscall.O_CREAT|syscall.O_EXCL, mode)
 }
 
 func mknodat(dirfd int, path string, mode uint32, dev uint64) (err error) {
 	if err := isSingleElement(path); err != nil {
 		return err
 	}
-	return unix.Mknodat(dirfd, path, mode, int(dev))
+
+	// Change directory to dirfd to ensure proper path creation
+	cwd, err := os.Open(fmt.Sprintf("/dev/fd/%d", dirfd))
+	if err != nil {
+		return err
+	}
+	defer cwd.Close()
+
+	// Create the node
+	return syscall.Mknod(filepath.Join("/dev/fd", fmt.Sprintf("%d", dirfd), path), mode, int(dev))
 }
 
 func open(path string) (fd int, err error) {
-	return syscall.Open(path, unix.O_PATH, 0)
+	return syscall.Open(path, unix.O_SYMLINK|unix.O_NOFOLLOW, 0)
 }
 
 func path(fd int) string {
-	return fmt.Sprintf("/proc/self/fd/%d", fd)
+	return fmt.Sprintf("/dev/fd/%d", fd)
 }
 
 func GetxattrNoFollow(path *Path, attr string) ([]byte, error) {
@@ -109,12 +118,12 @@ func GetxattrNoFollow(path *Path, attr string) ([]byte, error) {
 		return nil, err
 	}
 	defer pathFd.Close()
-	size, err := syscall.Getxattr(pathFd.SafePath(), attr, ret)
+	size, err := unix.Getxattr(pathFd.SafePath(), attr, ret)
 	if err != nil {
 		return nil, err
 	}
 	ret = make([]byte, size)
-	_, err = syscall.Getxattr(pathFd.SafePath(), attr, ret)
+	_, err = unix.Getxattr(pathFd.SafePath(), attr, ret)
 	if err != nil {
 		return nil, err
 	}

@@ -742,6 +742,13 @@ var _ = Describe("Export controller", func() {
 			service.Status.Conditions[0].Type = "test"
 			Expect(service.GetName()).To(Equal(controller.getExportServiceName(testVMExport)))
 			Expect(service.GetNamespace()).To(Equal(testNamespace))
+			Expect(service.GetLabels()).To(Equal(map[string]string{
+				"kubevirt.io": "virt-exporter",
+				"key":         "value",
+			}))
+			Expect(service.GetAnnotations()).To(Equal(map[string]string{
+				"key": "value",
+			}))
 			return true, service, nil
 		})
 
@@ -846,6 +853,14 @@ var _ = Describe("Export controller", func() {
 			Expect(ok).To(BeTrue())
 			Expect(pod.GetName()).To(Equal(fmt.Sprintf("%s-%s", exportPrefix, testVMExport.Name)))
 			Expect(pod.GetNamespace()).To(Equal(testNamespace))
+			Expect(pod.GetLabels()).To(Equal(map[string]string{
+				"kubevirt.io.virt-export-service": "test",
+				"key":                             "value",
+			}))
+			Expect(pod.GetAnnotations()).To(Equal(map[string]string{
+				"kubevirt.io/export.certParameters": "{\"Duration\":7200000000000,\"RenewBefore\":3600000000000}",
+				"key":                               "value",
+			}))
 			return true, pod, nil
 		})
 		var service *k8sv1.Service
@@ -1497,6 +1512,8 @@ func createPVCVMExport() *exportv1.VirtualMachineExport {
 			Name:              "test",
 			Namespace:         testNamespace,
 			CreationTimestamp: metav1.Now(),
+			Labels:            map[string]string{"key": "value"},
+			Annotations:       map[string]string{"key": "value"},
 		},
 		Spec: exportv1.VirtualMachineExportSpec{
 			Source: k8sv1.TypedLocalObjectReference{
@@ -1512,8 +1529,10 @@ func createPVCVMExport() *exportv1.VirtualMachineExport {
 func createPVCVMExportWithoutSecret() *exportv1.VirtualMachineExport {
 	return &exportv1.VirtualMachineExport{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-no-secret",
-			Namespace: testNamespace,
+			Name:        "test-no-secret",
+			Namespace:   testNamespace,
+			Labels:      map[string]string{"key": "value"},
+			Annotations: map[string]string{"key": "value"},
 		},
 		Spec: exportv1.VirtualMachineExportSpec{
 			Source: k8sv1.TypedLocalObjectReference{
@@ -1532,6 +1551,8 @@ func createSnapshotVMExport() *exportv1.VirtualMachineExport {
 			Namespace:         testNamespace,
 			UID:               "11111-22222-33333",
 			CreationTimestamp: metav1.Now(),
+			Labels:            map[string]string{"key": "value"},
+			Annotations:       map[string]string{"key": "value"},
 		},
 		Spec: exportv1.VirtualMachineExportSpec{
 			Source: k8sv1.TypedLocalObjectReference{
@@ -1551,6 +1572,8 @@ func createVMVMExport() *exportv1.VirtualMachineExport {
 			Namespace:         testNamespace,
 			UID:               "44444-555555-666666",
 			CreationTimestamp: metav1.Now(),
+			Labels:            map[string]string{"key": "value"},
+			Annotations:       map[string]string{"key": "value"},
 		},
 		Spec: exportv1.VirtualMachineExportSpec{
 			Source: k8sv1.TypedLocalObjectReference{
