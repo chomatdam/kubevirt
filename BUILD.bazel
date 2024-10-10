@@ -112,15 +112,18 @@ cc_library(
     name = "libvirt-libs",
     srcs = select({
         "@io_bazel_rules_go//go/platform:linux_arm64": ["//rpm:libvirt-libs_aarch64/usr/lib64"],
+        "@io_bazel_rules_go//go/platform:linux_s390x": ["//rpm:libvirt-libs_s390x/usr/lib64"],
         "//conditions:default": ["//rpm:libvirt-libs_x86_64/usr/lib64"],
     }),
     hdrs = select({
         "@io_bazel_rules_go//go/platform:linux_arm64": ["//rpm:libvirt-libs_aarch64/usr/include/libvirt"],
+        "@io_bazel_rules_go//go/platform:linux_s390x": ["//rpm:libvirt-libs_s390x/usr/include/libvirt"],
         "//conditions:default": ["//rpm:libvirt-libs_x86_64/usr/include/libvirt"],
     }),
     linkstatic = 1,
     strip_include_prefix = select({
         "@io_bazel_rules_go//go/platform:linux_arm64": "/rpm/libvirt-libs_aarch64/usr/include/",
+        "@io_bazel_rules_go//go/platform:linux_s390x": "/rpm/libvirt-libs_s390x/usr/include/",
         "//conditions:default": "/rpm/libvirt-libs_x86_64/usr/include/",
     }),
     visibility = ["//visibility:public"],
@@ -164,10 +167,12 @@ container_image(
     name = "passwd-image",
     architecture = select({
         "@io_bazel_rules_go//go/platform:linux_arm64": "arm64",
+        "@io_bazel_rules_go//go/platform:linux_s390x": "s390x",
         "//conditions:default": "amd64",
     }),
     base = select({
         "@io_bazel_rules_go//go/platform:linux_arm64": "@go_image_base_aarch64//image",
+        "@io_bazel_rules_go//go/platform:linux_s390x": "@go_image_base_s390x//image",
         "//conditions:default": "@go_image_base//image",
     }),
     tars = [":passwd-tar"],
@@ -185,33 +190,61 @@ config_setting(
     values = {"define": "release=true"},
 )
 
-container_bundle(
-    name = "build-other-images",
-    images = {
+load("@bazel_skylib//lib:dicts.bzl", "dicts")
+
+build_other_images_default = {
+    # cmd images
+    "$(container_prefix)/$(image_prefix)sidecar-shim:$(container_tag)": "//cmd/sidecars:sidecar-shim-image",
+    # container-disk images
+    "$(container_prefix)/$(image_prefix)alpine-container-disk-demo:$(container_tag)": "//containerimages:alpine-container-disk-image",
+    # Kernel boot container
+    # -
+    # Customized container-disk images
+    "$(container_prefix)/$(image_prefix)fedora-with-test-tooling-container-disk:$(container_tag)": "//containerimages:fedora-with-test-tooling",
+    # testing images
+    "$(container_prefix)/$(image_prefix)vm-killer:$(container_tag)": "//images/vm-killer:vm-killer-image",
+}
+
+build_other_images_aarch64_x86_64 = dicts.add(
+    build_other_images_default,
+    {
         # cmd images
-        "$(container_prefix)/$(image_prefix)sidecar-shim:$(container_tag)": "//cmd/sidecars:sidecar-shim-image",
         "$(container_prefix)/$(image_prefix)example-hook-sidecar:$(container_tag)": "//cmd/sidecars/smbios:example-hook-sidecar-image",
         "$(container_prefix)/$(image_prefix)example-disk-mutation-hook-sidecar:$(container_tag)": "//cmd/sidecars/disk-mutation:example-disk-mutation-hook-sidecar-image",
         "$(container_prefix)/$(image_prefix)example-cloudinit-hook-sidecar:$(container_tag)": "//cmd/sidecars/cloudinit:example-cloudinit-hook-sidecar-image",
         "$(container_prefix)/$(image_prefix)network-slirp-binding:$(container_tag)": "//cmd/sidecars/network-slirp-binding:network-slirp-binding-image",
         "$(container_prefix)/$(image_prefix)network-passt-binding:$(container_tag)": "//cmd/sidecars/network-passt-binding:network-passt-binding-image",
+        "$(container_prefix)/$(image_prefix)libguestfs-tools:$(container_tag)": "//cmd/libguestfs:libguestfs-tools-image",
+        "$(container_prefix)/$(image_prefix)pr-helper:$(container_tag)": "//cmd/pr-helper:pr-helper",
         # container-disk images
-        "$(container_prefix)/$(image_prefix)alpine-container-disk-demo:$(container_tag)": "//containerimages:alpine-container-disk-image",
         "$(container_prefix)/$(image_prefix)cirros-container-disk-demo:$(container_tag)": "//containerimages:cirros-container-disk-image",
         "$(container_prefix)/$(image_prefix)cirros-custom-container-disk-demo:$(container_tag)": "//containerimages:cirros-custom-container-disk-image",
         "$(container_prefix)/$(image_prefix)virtio-container-disk:$(container_tag)": "//containerimages:virtio-container-disk-image",
         # Kernel boot container
         "$(container_prefix)/$(image_prefix)alpine-ext-kernel-boot-demo:$(container_tag)": "//containerimages:alpine-ext-kernel-boot-demo-container",
         # Customized container-disk images
-        "$(container_prefix)/$(image_prefix)fedora-with-test-tooling-container-disk:$(container_tag)": "//containerimages:fedora-with-test-tooling",
         "$(container_prefix)/$(image_prefix)alpine-with-test-tooling-container-disk:$(container_tag)": "//containerimages:alpine-with-test-tooling",
         "$(container_prefix)/$(image_prefix)fedora-realtime-container-disk:$(container_tag)": "//containerimages:fedora-realtime",
         # testing images
         "$(container_prefix)/$(image_prefix)disks-images-provider:$(container_tag)": "//images/disks-images-provider:disks-images-provider-image",
         "$(container_prefix)/$(image_prefix)nfs-server:$(container_tag)": "//images/nfs-server:nfs-server-image",
-        "$(container_prefix)/$(image_prefix)vm-killer:$(container_tag)": "//images/vm-killer:vm-killer-image",
         "$(container_prefix)/$(image_prefix)winrmcli:$(container_tag)": "//images/winrmcli:winrmcli-image",
     },
+)
+
+container_bundle(
+    name = "build-other-images_s390x",
+    images = build_other_images_default,
+)
+
+container_bundle(
+    name = "build-other-images_aarch64",
+    images = build_other_images_aarch64_x86_64,
+)
+
+container_bundle(
+    name = "build-other-images_x86_64",
+    images = build_other_images_aarch64_x86_64,
 )
 
 # This is for generating a bundle of the core components for external processing
@@ -545,6 +578,16 @@ genrule(
         "//cmd/virtctl:virtctl-darwin-arm64",
     ],
     outs = ["virtctl-copier-darwin-arm64"],
+    cmd = "echo '#!/bin/sh\n\ncp -f $(SRCS) $$1' > \"$@\"",
+    executable = 1,
+)
+
+genrule(
+    name = "build-virtctl-s390x",
+    srcs = [
+        "//cmd/virtctl:virtctl-s390x",
+    ],
+    outs = ["virtctl-copier-s390x"],
     cmd = "echo '#!/bin/sh\n\ncp -f $(SRCS) $$1' > \"$@\"",
     executable = 1,
 )

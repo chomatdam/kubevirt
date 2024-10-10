@@ -1,7 +1,14 @@
 export GO15VENDOREXPERIMENT := 1
 
+ifeq (${CI}, true)
+  # If we're running under a test lane, enable timestamps and disable progress output
+  TIMESTAMP=1
+  ifeq (,$(wildcard ci.bazelrc))
+    $(shell echo 'build --noshow_progress' > ci.bazelrc)
+  endif
+endif
+
 ifeq (${TIMESTAMP}, 1)
-  $(info "Timestamp is enabled")
   SHELL = ./hack/timestamps.sh
 endif
 
@@ -50,6 +57,7 @@ generate:
 	SYNC_VENDOR=true hack/dockerized "./hack/bazel-generate.sh && hack/bazel-fmt.sh"
 	hack/dockerized hack/sync-kubevirtci.sh
 	hack/dockerized hack/sync-common-instancetypes.sh
+	./hack/update-generated-api-testdata.sh
 
 generate-verify: generate
 	./hack/verify-generate.sh
@@ -62,7 +70,7 @@ client-python:
 	hack/dockerized "DOCKER_TAG=${DOCKER_TAG} ./hack/gen-client-python/generate.sh"
 
 go-build:
-	hack/dockerized "export KUBEVIRT_NO_BAZEL=true && KUBEVIRT_VERSION=${KUBEVIRT_VERSION} KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} KUBEVIRT_RELEASE=${KUBEVIRT_RELEASE} ./hack/build-go.sh install ${WHAT}" && ./hack/build-copy-artifacts.sh ${WHAT}
+	KUBEVIRT_NO_BAZEL=true hack/dockerized "export KUBEVIRT_VERSION=${KUBEVIRT_VERSION} && KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} KUBEVIRT_RELEASE=${KUBEVIRT_RELEASE} ./hack/build-go.sh install ${WHAT}" && ./hack/build-copy-artifacts.sh ${WHAT}
 
 go-build-functests:
 	hack/dockerized "export KUBEVIRT_NO_BAZEL=true && KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} ./hack/go-build-functests.sh"
@@ -77,7 +85,7 @@ goveralls:
 	SYNC_OUT=false hack/dockerized "COVERALLS_TOKEN_FILE=${COVERALLS_TOKEN_FILE} COVERALLS_TOKEN=${COVERALLS_TOKEN} CI_NAME=prow CI_BRANCH=${PULL_BASE_REF} CI_PR_NUMBER=${PULL_NUMBER} GIT_ID=${PULL_PULL_SHA} PROW_JOB_ID=${PROW_JOB_ID} ./hack/bazel-goveralls.sh"
 
 go-test: go-build
-	SYNC_OUT=false hack/dockerized "export KUBEVIRT_NO_BAZEL=true && KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} ./hack/build-go.sh test ${WHAT}"
+	SYNC_OUT=false KUBEVIRT_NO_BAZEL=true hack/dockerized "export KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} && ./hack/build-go.sh test ${WHAT}"
 
 test: bazel-test
 
@@ -104,6 +112,9 @@ conformance:
 
 perftest: build-functests
 	hack/perftests.sh
+
+kwok-perftest: build-functests
+	hack/kwok-perftests.sh
 
 realtime-perftest: build-functests
 	hack/realtime-perftests.sh
@@ -206,28 +217,21 @@ format:
 fmt: format
 
 lint:
-	if [ $$(wc -l < tests/utils.go) -gt 2027 ]; then echo >&2 "do not make tests/utils longer"; exit 1; fi
-	hack/dockerized "golangci-lint run --timeout 20m --verbose \
-	  pkg/instancetype/... \
-	  pkg/network/namescheme/... \
-	  pkg/network/domainspec/... \
-	  pkg/network/sriov/... \
-	  tests/console/... \
-	  tests/libnet/... \
-	  tests/libnode/... \
-	  tests/libpod/... \
-	  tests/libvmi/... \
-	  && \
-	  golangci-lint run --disable-all -E ginkgolinter --timeout 10m --verbose --no-config \
-	  ./pkg/... \
-	  ./tests/... \
-	"
+	if [ $$(wc -l < tests/utils.go) -gt 350 ]; then echo >&2 "do not make tests/utils longer"; exit 1; fi
+	hack/dockerized "hack/golangci-lint.sh"
+	hack/dockerized "monitoringlinter ./pkg/..."
 
 lint-metrics:
 	hack/dockerized "./hack/prom-metric-linter/metrics_collector.sh > metrics.json"
 	./hack/prom-metric-linter/metric_name_linter.sh --operator-name="kubevirt" --sub-operator-name="kubevirt" --metrics-file=metrics.json
 	rm metrics.json
 
+gofumpt:
+	./hack/dockerized "hack/gofumpt.sh"
+
+update-generated-api-testdata:
+	./hack/update-generated-api-testdata.sh
+    
 .PHONY: \
 	build-verify \
 	conformance \
@@ -264,5 +268,6 @@ lint-metrics:
 	format \
 	fmt \
 	lint \
-	lint-metrics\
+	lint-metrics \
+	update-generated-api-testdata \
 	$(NULL)

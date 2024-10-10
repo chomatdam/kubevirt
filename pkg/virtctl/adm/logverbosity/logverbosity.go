@@ -1,6 +1,7 @@
 package logverbosity
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,11 +69,8 @@ const (
 
 // for patch operation
 const (
-	// Just "add" is fine, no need of "replace" and "remove".
-	// https://www.rfc-editor.org/rfc/rfc6902
-	patchAdd = patch.PatchAddOp
-	dcPath   = "/spec/configuration/developerConfiguration"
-	lvPath   = "/spec/configuration/developerConfiguration/logVerbosity"
+	dcPath = "/spec/configuration/developerConfiguration"
+	lvPath = "/spec/configuration/developerConfiguration/logVerbosity"
 )
 
 func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
@@ -180,7 +178,7 @@ func getJSONNameByComponentName(componentName string) string {
 }
 
 func detectInstallNamespaceAndName(virtClient kubecli.KubevirtClient) (string, string, error) {
-	kvs, err := virtClient.KubeVirt(k8smetav1.NamespaceAll).List(&k8smetav1.ListOptions{})
+	kvs, err := virtClient.KubeVirt(k8smetav1.NamespaceAll).List(context.Background(), k8smetav1.ListOptions{})
 	if err != nil {
 		return "", "", fmt.Errorf("could not list KubeVirt CRs across all namespaces: %v", err)
 	}
@@ -261,15 +259,7 @@ func createShowMessage(currentLv map[string]uint) []string {
 	return lines
 }
 
-func addPatch(patchData *[]patch.PatchOperation, op string, path string, value interface{}) {
-	*patchData = append(*patchData, patch.PatchOperation{
-		Op:    op,
-		Path:  path,
-		Value: value,
-	})
-}
-
-func setVerbosity(currentLv map[string]uint, patchData *[]patch.PatchOperation, hasDeveloperConfiguration bool) {
+func setVerbosity(currentLv map[string]uint) {
 	// update currentLv based on the user-specified verbosity for all components
 	if *virtComponents[allComponents] != NoFlag {
 		for componentName := range virtComponents {
@@ -289,35 +279,38 @@ func setVerbosity(currentLv map[string]uint, patchData *[]patch.PatchOperation, 
 		JSONName := getJSONNameByComponentName(componentName)
 		currentLv[JSONName] = *verbosity
 	}
-
-	// in case of just reset (no set operation after the reset), don't need to add another patch
-	if len(currentLv) != 0 {
-		if !hasDeveloperConfiguration {
-			// if DeveloperConfiguration is absent, add DeveloperConfiguration first
-			addPatch(patchData, patchAdd, dcPath, &v1.DeveloperConfiguration{})
-		}
-		addPatch(patchData, patchAdd, lvPath, currentLv)
-	}
 }
 
 func createPatch(currentLv map[string]uint, hasDeveloperConfiguration bool) ([]byte, error) {
-	patchData := []patch.PatchOperation{}
+	patchSet := patch.New()
 
 	// reset only if verbosity exists, otherwise do nothing
 	if isReset && len(currentLv) != 0 {
 		if !hasDeveloperConfiguration {
 			// if DeveloperConfiguration is absent, add DeveloperConfiguration first
-			addPatch(&patchData, patchAdd, dcPath, &v1.DeveloperConfiguration{})
+			patchSet.AddOption(patch.WithAdd(dcPath, v1.DeveloperConfiguration{}))
 			hasDeveloperConfiguration = true
 		}
 		// add an empty object
 		currentLv = map[string]uint{}
-		addPatch(&patchData, patchAdd, lvPath, currentLv)
+		patchSet.AddOption(patch.WithAdd(lvPath, currentLv))
 	}
 
-	setVerbosity(currentLv, &patchData, hasDeveloperConfiguration)
+	setVerbosity(currentLv)
 
-	return json.Marshal(patchData)
+	// in case of just reset (no set operation after the reset), don't need to add another patch
+	if len(currentLv) != 0 {
+		if !hasDeveloperConfiguration {
+			// if DeveloperConfiguration is absent, add DeveloperConfiguration first
+			patchSet.AddOption(patch.WithAdd(dcPath, &v1.DeveloperConfiguration{}))
+		}
+		patchSet.AddOption(patch.WithAdd(lvPath, currentLv))
+	}
+	if patchSet.IsEmpty() {
+		return nil, nil
+	}
+
+	return patchSet.GeneratePayload()
 }
 
 func findOperation(cmd *cobra.Command) (operation, error) {
@@ -369,7 +362,7 @@ func (c *Command) RunE(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	kv, err := virtClient.KubeVirt(namespace).Get(name, &k8smetav1.GetOptions{})
+	kv, err := virtClient.KubeVirt(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -409,7 +402,10 @@ func (c *Command) RunE(cmd *cobra.Command) error {
 		if err != nil {
 			return err
 		}
-		_, err = virtClient.KubeVirt(namespace).Patch(name, types.JSONPatchType, patchData, &k8smetav1.PatchOptions{})
+		if patchData == nil {
+			return nil
+		}
+		_, err = virtClient.KubeVirt(namespace).Patch(context.Background(), name, types.JSONPatchType, patchData, k8smetav1.PatchOptions{})
 		if err != nil {
 			return err
 		}

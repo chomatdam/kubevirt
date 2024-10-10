@@ -26,25 +26,24 @@ import (
 	"path/filepath"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	audit_api "kubevirt.io/kubevirt/tools/perfscale-audit/api"
-	metric_client "kubevirt.io/kubevirt/tools/perfscale-audit/metric-client"
-
 	kvv1 "kubevirt.io/api/core/v1"
-	instancetypeapi "kubevirt.io/api/instancetype"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
 
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests/libvmi"
-	"kubevirt.io/kubevirt/tests/util"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	audit_api "kubevirt.io/kubevirt/tools/perfscale-audit/api"
+	metric_client "kubevirt.io/kubevirt/tools/perfscale-audit/metric-client"
+
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	instancetypeBuilder "kubevirt.io/kubevirt/tests/libinstancetype/builder"
+	"kubevirt.io/kubevirt/tests/libvmifact"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 var PrometheusScrapeInterval = time.Duration(30 * time.Second)
@@ -191,7 +190,7 @@ func createBatchVMIWithRateControl(virtClient kubecli.KubevirtClient, vmCount in
 	for i := 1; i <= vmCount; i++ {
 		vmi := createVMISpecWithResources()
 		By(fmt.Sprintf("Creating VMI %s", vmi.ObjectMeta.Name))
-		_, err := virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(context.Background(), vmi)
+		_, err := virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Create(context.Background(), vmi, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		// interval for throughput control
@@ -201,23 +200,18 @@ func createBatchVMIWithRateControl(virtClient kubecli.KubevirtClient, vmCount in
 
 func createBatchRunningVMWithInstancetypeWithRateControl(virtClient kubecli.KubevirtClient, vmCount int, instancetypeName, preferenceName string) {
 	createBatchRunningVMWithRateControl(virtClient, vmCount, func() *kvv1.VirtualMachine {
-		vm := libvmi.NewVirtualMachine(libvmi.NewCirros(), libvmi.WithRunning())
-		vm.Spec.Template.Spec.Domain.Resources = kvv1.ResourceRequirements{}
-		vm.Spec.Instancetype = &kvv1.InstancetypeMatcher{
-			Name: instancetypeName,
-			Kind: instancetypeapi.SingularResourceName,
-		}
-		vm.Spec.Preference = &kvv1.PreferenceMatcher{
-			Name: preferenceName,
-			Kind: instancetypeapi.SingularPreferenceResourceName,
-		}
-		return vm
+		return libvmi.NewVirtualMachine(
+			libvmifact.NewCirros(),
+			libvmi.WithRunStrategy(kvv1.RunStrategyAlways),
+			libvmi.WithInstancetype(instancetypeName),
+			libvmi.WithPreference(preferenceName),
+		)
 	})
 }
 
 func createBatchRunningVMWithResourcesWithRateControl(virtClient kubecli.KubevirtClient, vmCount int) {
 	createBatchRunningVMWithRateControl(virtClient, vmCount, func() *kvv1.VirtualMachine {
-		return libvmi.NewVirtualMachine(createVMISpecWithResources(), libvmi.WithRunning())
+		return libvmi.NewVirtualMachine(createVMISpecWithResources(), libvmi.WithRunStrategy(kvv1.RunStrategyAlways))
 	})
 }
 
@@ -225,7 +219,7 @@ func createBatchRunningVMWithRateControl(virtClient kubecli.KubevirtClient, vmCo
 	for i := 1; i <= vmCount; i++ {
 		vm := vmCreateFunc()
 		By(fmt.Sprintf("Creating VM %s", vm.ObjectMeta.Name))
-		_, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Create(context.Background(), vm)
+		_, err := virtClient.VirtualMachine(testsuite.NamespaceTestDefault).Create(context.Background(), vm, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		// interval for throughput control
@@ -234,37 +228,20 @@ func createBatchRunningVMWithRateControl(virtClient kubecli.KubevirtClient, vmCo
 }
 
 func createInstancetype(virtClient kubecli.KubevirtClient) *instancetypev1beta1.VirtualMachineInstancetype {
-	instancetype := &instancetypev1beta1.VirtualMachineInstancetype{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "instancetype",
-		},
-		Spec: instancetypev1beta1.VirtualMachineInstancetypeSpec{
-			// FIXME - We don't have a way of expressing resources via instancetypes yet, replace this when we do.
-			CPU: instancetypev1beta1.CPUInstancetype{
-				Guest: 1,
-			},
-			Memory: instancetypev1beta1.MemoryInstancetype{
-				Guest: resource.MustParse("90Mi"),
-			},
-		},
-	}
-	instancetype, err := virtClient.VirtualMachineInstancetype(util.NamespaceTestDefault).Create(context.Background(), instancetype, metav1.CreateOptions{})
+	instancetype := instancetypeBuilder.NewInstancetype(
+		instancetypeBuilder.WithCPUs(1),
+		instancetypeBuilder.WithMemory("90Mi"),
+	)
+	instancetype, err := virtClient.VirtualMachineInstancetype(testsuite.NamespaceTestDefault).Create(context.Background(), instancetype, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
 	return instancetype
 }
 
 func createPreference(virtClient kubecli.KubevirtClient) *instancetypev1beta1.VirtualMachinePreference {
-	preference := &instancetypev1beta1.VirtualMachinePreference{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "preference",
-		},
-		Spec: instancetypev1beta1.VirtualMachinePreferenceSpec{
-			Devices: &instancetypev1beta1.DevicePreferences{
-				PreferredDiskBus: kvv1.DiskBusVirtio,
-			},
-		},
-	}
-	preference, err := virtClient.VirtualMachinePreference(util.NamespaceTestDefault).Create(context.Background(), preference, metav1.CreateOptions{})
+	preference := instancetypeBuilder.NewPreference(
+		instancetypeBuilder.WithPreferredDiskBus(kvv1.DiskBusVirtio),
+	)
+	preference, err := virtClient.VirtualMachinePreference(testsuite.NamespaceTestDefault).Create(context.Background(), preference, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
 	return preference
 }
@@ -272,7 +249,7 @@ func createPreference(virtClient kubecli.KubevirtClient) *instancetypev1beta1.Vi
 func createVMISpecWithResources() *kvv1.VirtualMachineInstance {
 	cpuLimit := "100m"
 	memLimit := "90Mi"
-	vmi := libvmi.NewCirros(
+	vmi := libvmifact.NewCirros(
 		libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 		libvmi.WithNetwork(kvv1.DefaultPodNetwork()),
 		libvmi.WithResourceMemory(memLimit),
@@ -285,7 +262,7 @@ func createVMISpecWithResources() *kvv1.VirtualMachineInstance {
 
 func waitRunningVMI(virtClient kubecli.KubevirtClient, vmiCount int, timeout time.Duration) {
 	Eventually(func() int {
-		vmis, err := virtClient.VirtualMachineInstance(util.NamespaceTestDefault).List(context.Background(), &metav1.ListOptions{})
+		vmis, err := virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).List(context.Background(), metav1.ListOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		running := 0
 		for _, vmi := range vmis.Items {

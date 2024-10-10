@@ -21,7 +21,6 @@ package nodelabeller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -29,6 +28,7 @@ import (
 	"time"
 
 	"k8s.io/client-go/tools/record"
+	"libvirt.org/go/libvirtxml"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -43,7 +43,6 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/api"
 )
 
 var nodeLabellerLabels = []string{
@@ -71,20 +70,20 @@ type NodeLabeller struct {
 	hostCapabilities        supportedFeatures
 	queue                   workqueue.RateLimitingInterface
 	supportedFeatures       []string
-	cpuInfo                 cpuInfo
 	cpuModelVendor          string
 	volumePath              string
 	domCapabilitiesFileName string
-	capabilities            *api.Capabilities
+	cpuCounter              *libvirtxml.CapsHostCPUCounter
 	hostCPUModel            hostCPUModel
 	SEV                     SEVConfiguration
+	arch                    string
 }
 
-func NewNodeLabeller(clusterConfig *virtconfig.ClusterConfig, nodeClient k8scli.NodeInterface, host string, recorder record.EventRecorder) (*NodeLabeller, error) {
-	return newNodeLabeller(clusterConfig, nodeClient, host, nodeLabellerVolumePath, recorder)
+func NewNodeLabeller(clusterConfig *virtconfig.ClusterConfig, nodeClient k8scli.NodeInterface, host string, recorder record.EventRecorder, cpuCounter *libvirtxml.CapsHostCPUCounter) (*NodeLabeller, error) {
+	return newNodeLabeller(clusterConfig, nodeClient, host, NodeLabellerVolumePath, recorder, cpuCounter)
 
 }
-func newNodeLabeller(clusterConfig *virtconfig.ClusterConfig, nodeClient k8scli.NodeInterface, host, volumePath string, recorder record.EventRecorder) (*NodeLabeller, error) {
+func newNodeLabeller(clusterConfig *virtconfig.ClusterConfig, nodeClient k8scli.NodeInterface, host, volumePath string, recorder record.EventRecorder, cpuCounter *libvirtxml.CapsHostCPUCounter) (*NodeLabeller, error) {
 	n := &NodeLabeller{
 		recorder:                recorder,
 		nodeClient:              nodeClient,
@@ -94,7 +93,9 @@ func newNodeLabeller(clusterConfig *virtconfig.ClusterConfig, nodeClient k8scli.
 		queue:                   workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-handler-node-labeller"),
 		volumePath:              volumePath,
 		domCapabilitiesFileName: "virsh_domcapabilities.xml",
+		cpuCounter:              cpuCounter,
 		hostCPUModel:            hostCPUModel{requiredFeatures: make(map[string]bool, 0)},
+		arch:                    runtime.GOARCH,
 	}
 
 	err := n.loadAll()
@@ -109,6 +110,10 @@ func (n *NodeLabeller) Run(threadiness int, stop chan struct{}) {
 	defer n.queue.ShutDown()
 
 	n.logger.Infof("node-labeller is running")
+
+	if !n.hasTSCCounter() {
+		n.logger.Error("failed to get tsc cpu frequency, will continue without the tsc frequency label")
+	}
 
 	n.clusterConfig.SetConfigModifiedCallback(func() {
 		n.queue.Add(n.host)
@@ -147,31 +152,19 @@ func (n *NodeLabeller) execute() bool {
 }
 
 func (n *NodeLabeller) loadAll() error {
-	err := n.loadCPUInfo()
-	if err != nil {
-		n.logger.Errorf("node-labeller could not load cpu info: " + err.Error())
-		return err
-	}
-
-	// host supported features is only available on AMD64 nodes.
+	// host supported features is only available on AMD64 and S390X nodes.
 	// This is because hypervisor-cpu-baseline virsh command doesnt work for ARM64 architecture.
-	if virtconfig.IsAMD64(runtime.GOARCH) {
-		err = n.loadHostSupportedFeatures()
+	if virtconfig.IsAMD64(n.arch) || virtconfig.IsS390X(n.arch) {
+		err := n.loadHostSupportedFeatures()
 		if err != nil {
 			n.logger.Errorf("node-labeller could not load supported features: " + err.Error())
 			return err
 		}
 	}
 
-	err = n.loadDomCapabilities()
+	err := n.loadDomCapabilities()
 	if err != nil {
 		n.logger.Errorf("node-labeller could not load host dom capabilities: " + err.Error())
-		return err
-	}
-
-	err = n.loadHostCapabilities()
-	if err != nil {
-		n.logger.Errorf("node-labeller could not load host capabilities: " + err.Error())
 		return err
 	}
 
@@ -213,32 +206,21 @@ func skipNodeLabelling(node *v1.Node) bool {
 }
 
 func (n *NodeLabeller) patchNode(originalNode, node *v1.Node) error {
-	p := make([]patch.PatchOperation, 0)
-	if !equality.Semantic.DeepEqual(originalNode.Labels, node.Labels) {
-		p = append(p, patch.PatchOperation{
-			Op:    "test",
-			Path:  "/metadata/labels",
-			Value: originalNode.Labels,
-		}, patch.PatchOperation{
-			Op:    "replace",
-			Path:  "/metadata/labels",
-			Value: node.Labels,
-		})
+	if equality.Semantic.DeepEqual(originalNode.Labels, node.Labels) {
+		return nil
 	}
 
-	// patch node only if there is change in labels
-	if len(p) > 0 {
-		payloadBytes, err := json.Marshal(p)
-		if err != nil {
-			return err
-		}
-		_, err = n.nodeClient.Patch(context.Background(), node.Name, types.JSONPatchType, payloadBytes, metav1.PatchOptions{})
-		if err != nil {
-			return err
-		}
+	patchBytes, err := patch.New(
+		patch.WithTest("/metadata/labels", originalNode.Labels),
+		patch.WithReplace("/metadata/labels", node.Labels),
+	).GeneratePayload()
+
+	if err != nil {
+		return err
 	}
 
-	return nil
+	_, err = n.nodeClient.Patch(context.Background(), node.Name, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
+	return err
 }
 
 func (n *NodeLabeller) loadHypervFeatures() {
@@ -254,10 +236,6 @@ func (n *NodeLabeller) prepareLabels(node *v1.Node, cpuModels []string, cpuFeatu
 	}
 
 	for _, value := range cpuModels {
-		if !n.shouldAddCPUModelLabel(value, &hostCpuModel, newLabels) {
-			continue
-		}
-
 		newLabels[kubevirtv1.CPUModelLabel+value] = "true"
 		newLabels[kubevirtv1.SupportedHostModelMigrationCPU+value] = "true"
 	}
@@ -270,11 +248,9 @@ func (n *NodeLabeller) prepareLabels(node *v1.Node, cpuModels []string, cpuFeatu
 		newLabels[kubevirtv1.HypervLabel+key] = "true"
 	}
 
-	if c, err := n.capabilities.GetTSCCounter(); err == nil && c != nil {
-		newLabels[kubevirtv1.CPUTimerLabel+"tsc-frequency"] = fmt.Sprintf("%d", c.Frequency)
-		newLabels[kubevirtv1.CPUTimerLabel+"tsc-scalable"] = fmt.Sprintf("%v", c.Scaling)
-	} else if err != nil {
-		n.logger.Reason(err).Error("failed to get tsc cpu frequency, will continue without the tsc frequency label")
+	if n.hasTSCCounter() {
+		newLabels[kubevirtv1.CPUTimerLabel+"tsc-frequency"] = fmt.Sprintf("%d", n.cpuCounter.Frequency)
+		newLabels[kubevirtv1.CPUTimerLabel+"tsc-scalable"] = fmt.Sprintf("%t", n.cpuCounter.Scaling == "yes")
 	}
 
 	for feature := range hostCpuModel.requiredFeatures {
@@ -315,10 +291,6 @@ func (n *NodeLabeller) addLabellerLabels(node *v1.Node, labels map[string]string
 	for key, value := range labels {
 		node.Labels[key] = value
 	}
-}
-
-func (n *NodeLabeller) HostCapabilities() *api.Capabilities {
-	return n.capabilities
 }
 
 // removeLabellerLabels removes labels from node
@@ -362,34 +334,6 @@ func (n *NodeLabeller) alertIfHostModelIsObsolete(originalNode *v1.Node, hostMod
 	return nil
 }
 
-func (n *NodeLabeller) shouldAddCPUModelLabel(
-	cpuModelName string,
-	hostCpuModel *hostCPUModel,
-	featureLabels map[string]string,
-) bool {
-	if cpuModelName == hostCpuModel.Name {
-		return true
-	}
-	// The logic below is necessary to handle the scenarios when libvirt's definition of a
-	// particular CPU model differs from hypervisor's definition.
-	// E.g. currently Opteron_G2 requires svm by libvirt:
-	//     /usr/share/libvirt/cpu_map/x86_Opteron_G2.xml
-	// But libvirt marks it as Usable:yes even without svm because it is usable by qemu:
-	//     /var/lib/kubevirt-node-labeller/virsh_domcapabilities.xml
-	// For more information refer to https://wiki.qemu.org/Features/CPUModels, "Getting
-	// information about CPU models" section.
-	// Another similar issue:
-	//     https://gitlab.com/libvirt/libvirt/-/issues/304
-	requiredFeatures, ok := n.cpuInfo.usableModels[cpuModelName]
-	if !ok {
-		n.logger.Warningf("The list of required features for CPU model %s is not defined", cpuModelName)
-		return false
-	}
-	missingFeatures := make([]string, 0)
-	for f := range requiredFeatures {
-		if _, isFeatureSupported := featureLabels[kubevirtv1.CPUFeatureLabel+f]; !isFeatureSupported {
-			missingFeatures = append(missingFeatures, f)
-		}
-	}
-	return len(missingFeatures) == 0
+func (n *NodeLabeller) hasTSCCounter() bool {
+	return n.cpuCounter != nil && n.cpuCounter.Name == "tsc"
 }

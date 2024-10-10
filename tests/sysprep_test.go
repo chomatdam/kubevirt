@@ -26,35 +26,34 @@ import (
 	"strings"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/libvmi"
-
-	"kubevirt.io/kubevirt/tests/decorators"
-
-	"kubevirt.io/kubevirt/tests/exec"
-	"kubevirt.io/kubevirt/tests/framework/checks"
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-	"kubevirt.io/kubevirt/tests/testsuite"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests"
-	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+
+	"kubevirt.io/kubevirt/pkg/pointer"
+	"kubevirt.io/kubevirt/tests/decorators"
+	"kubevirt.io/kubevirt/tests/exec"
+	"kubevirt.io/kubevirt/tests/framework/checks"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libconfigmap"
+	"kubevirt.io/kubevirt/tests/libregistry"
 	"kubevirt.io/kubevirt/tests/libstorage"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
-	"kubevirt.io/kubevirt/tests/util"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 const (
-	windowsSealedDisk = "windows-disk"
+	windowsSealedDisk  = "windows-disk"
+	diskWindowsSysprep = "disk-windows-sysprep"
 )
 
 const (
@@ -226,10 +225,11 @@ func addExplicitPodNetworkInterface(vmi *v1.VirtualMachineInstance) {
 	vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
 }
 
+// Deprecated: Use libvmi
 func getWindowsSysprepVMISpec() v1.VirtualMachineInstanceSpec {
 	gracePeriod := int64(0)
 	spinlocks := uint32(8191)
-	firmware := types.UID(libvmi.WindowsFirmware)
+	firmware := types.UID(libvmifact.WindowsFirmware)
 	_false := false
 	return v1.VirtualMachineInstanceSpec{
 		TerminationGracePeriodSeconds: &gracePeriod,
@@ -278,7 +278,7 @@ func getWindowsSysprepVMISpec() v1.VirtualMachineInstanceSpec {
 				VolumeSource: v1.VolumeSource{
 					Ephemeral: &v1.EphemeralVolumeSource{
 						PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
-							ClaimName: tests.DiskWindowsSysprep,
+							ClaimName: diskWindowsSysprep,
 						},
 					},
 				},
@@ -312,12 +312,15 @@ var _ = Describe("[Serial][Sysprep][sig-compute]Syspreped VirtualMachineInstance
 	BeforeEach(func() {
 		const OSWindowsSysprep = "windows-sysprep"
 		virtClient = kubevirt.Client()
-		checks.SkipIfMissingRequiredImage(virtClient, tests.DiskWindowsSysprep)
+		checks.SkipIfMissingRequiredImage(virtClient, diskWindowsSysprep)
 		libstorage.CreatePVC(OSWindowsSysprep, testsuite.GetTestNamespace(nil), "35Gi", libstorage.Config.StorageClassWindows, true)
 		answerFileWithKey := insertProductKeyToAnswerFileTemplate(answerFileTemplate)
-		windowsVMI = tests.NewRandomVMI()
+		windowsVMI = libvmi.New()
 		windowsVMI.Spec = getWindowsSysprepVMISpec()
-		tests.CreateConfigMap("sysprepautounattend", windowsVMI.Namespace, map[string]string{"Autounattend.xml": answerFileWithKey, "Unattend.xml": answerFileWithKey})
+		windowsVMI.ObjectMeta.Namespace = testsuite.GetTestNamespace(windowsVMI)
+		cm := libconfigmap.New("sysprepautounattend", map[string]string{"Autounattend.xml": answerFileWithKey, "Unattend.xml": answerFileWithKey})
+		cm, err := virtClient.CoreV1().ConfigMaps(windowsVMI.Namespace).Create(context.Background(), cm, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
 		addExplicitPodNetworkInterface(windowsVMI)
 		windowsVMI.Spec.Domain.Devices.Interfaces[0].Model = "e1000"
 	})
@@ -331,18 +334,18 @@ var _ = Describe("[Serial][Sysprep][sig-compute]Syspreped VirtualMachineInstance
 		BeforeEach(func() {
 			By("Creating winrm-cli pod for the future use")
 			winrmcliPod = winRMCliPod()
-			winrmcliPod, err = virtClient.CoreV1().Pods(util.NamespaceTestDefault).Create(context.Background(), winrmcliPod, metav1.CreateOptions{})
+			winrmcliPod, err = virtClient.CoreV1().Pods(testsuite.NamespaceTestDefault).Create(context.Background(), winrmcliPod, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Starting the windows VirtualMachineInstance")
-			windowsVMI, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(context.Background(), windowsVMI)
+			windowsVMI, err = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Create(context.Background(), windowsVMI, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			libwait.WaitForSuccessfulVMIStart(windowsVMI,
 				libwait.WithTimeout(720),
 			)
 
-			windowsVMI, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Get(context.Background(), windowsVMI.Name, &metav1.GetOptions{})
+			windowsVMI, err = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Get(context.Background(), windowsVMI.Name, metav1.GetOptions{})
 			vmiIp = windowsVMI.Status.Interfaces[0].IP
 			cli = []string{
 				winrmCliCmd,
@@ -360,7 +363,6 @@ var _ = Describe("[Serial][Sysprep][sig-compute]Syspreped VirtualMachineInstance
 			Eventually(func() error {
 				fmt.Printf("Running \"%s\" command via winrm-cli\n", command)
 				output, err = exec.ExecuteCommandOnPod(
-					virtClient,
 					winrmcliPod,
 					winrmcliPod.Spec.Containers[0].Name,
 					command,
@@ -382,17 +384,17 @@ func winRMCliPod() *k8sv1.Pod {
 			Containers: []k8sv1.Container{
 				{
 					Name:    winrmCli,
-					Image:   fmt.Sprintf("%s/%s:%s", flags.KubeVirtUtilityRepoPrefix, winrmCli, flags.KubeVirtUtilityVersionTag),
+					Image:   libregistry.GetUtilityImageFromRegistry(winrmCli),
 					Command: []string{"sleep"},
 					Args:    []string{"3600"},
 					SecurityContext: &k8sv1.SecurityContext{
-						AllowPrivilegeEscalation: pointer.Bool(false),
+						AllowPrivilegeEscalation: pointer.P(false),
 						Capabilities:             &k8sv1.Capabilities{Drop: []k8sv1.Capability{"ALL"}},
 					},
 				},
 			},
 			SecurityContext: &k8sv1.PodSecurityContext{
-				RunAsNonRoot:   pointer.Bool(true),
+				RunAsNonRoot:   pointer.P(true),
 				RunAsUser:      &user,
 				SeccompProfile: &k8sv1.SeccompProfile{Type: k8sv1.SeccompProfileTypeRuntimeDefault},
 			},

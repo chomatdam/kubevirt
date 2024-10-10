@@ -24,7 +24,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -43,19 +42,13 @@ func init() {
 var _ = Describe("VirtLauncher", func() {
 	var mon *monitor
 	var cmd *exec.Cmd
-	var cmdLock sync.Mutex
 	var gracefulShutdownChannel chan struct{}
-	var fakeUuid string
 	var pidDir string
 	var processStarted bool
-	var err error
 
 	StartProcess := func() {
-		cmdLock.Lock()
-		defer cmdLock.Unlock()
-
-		cmd = exec.Command(fakeQEMUBinary, "--uuid", fakeUuid, "--pidfile", filepath.Join(pidDir, "fakens_fakevmi.pid"))
-		err = cmd.Start()
+		cmd = exec.Command(fakeQEMUBinary, "--uuid", uuid.New().String(), "--pidfile", filepath.Join(pidDir, "fakens_fakevmi.pid"))
+		err := cmd.Start()
 		Expect(err).ToNot(HaveOccurred())
 
 		currentPid := cmd.Process.Pid
@@ -65,49 +58,28 @@ var _ = Describe("VirtLauncher", func() {
 	}
 
 	StopProcess := func() {
-		cmdLock.Lock()
-		defer cmdLock.Unlock()
-
 		cmd.Process.Kill()
 
 		processStarted = false
 	}
 
-	CleanupProcess := func() {
-		cmdLock.Lock()
-		defer cmdLock.Unlock()
-
-		cmd.Wait()
-	}
-
 	VerifyProcessStarted := func() {
 		Eventually(func() bool {
-
 			mon.refresh()
-			if mon.pid != 0 {
-				return true
-			}
-			return false
-
+			return mon.pid != 0
 		}).Should(BeTrue())
 
 	}
 
 	VerifyProcessStopped := func() {
 		Eventually(func() bool {
-
 			mon.refresh()
-			if mon.pid == 0 && mon.isDone == true {
-				return true
-			}
-			return false
-
+			return mon.pid == 0 && mon.isDone
 		}).Should(BeTrue())
 
 	}
 
 	BeforeEach(func() {
-		fakeUuid = uuid.New().String()
 		pidDir = GinkgoT().TempDir()
 
 		processStarted = false
@@ -135,10 +107,10 @@ var _ = Describe("VirtLauncher", func() {
 	})
 
 	AfterEach(func() {
-		if processStarted == true {
+		if processStarted {
 			StopProcess()
-			CleanupProcess()
 		}
+		cmd.Wait()
 	})
 
 	Describe("VirtLauncher", func() {
@@ -146,7 +118,6 @@ var _ = Describe("VirtLauncher", func() {
 			It("verify pid detection works", func() {
 				StartProcess()
 				VerifyProcessStarted()
-				go func() { CleanupProcess() }()
 				StopProcess()
 				VerifyProcessStopped()
 			})
@@ -158,7 +129,7 @@ var _ = Describe("VirtLauncher", func() {
 				VerifyProcessStopped()
 
 				// cleanup after stopping ensures zombie process is detected
-				CleanupProcess()
+				cmd.Wait()
 			})
 
 			It("verify start timeout works", func() {
@@ -166,19 +137,11 @@ var _ = Describe("VirtLauncher", func() {
 				done := make(chan string)
 
 				go func() {
+					defer GinkgoRecover()
 					mon.RunForever(time.Second, stopChan)
 					done <- "exit"
 				}()
-				noExitCheck := time.After(3 * time.Second)
-
-				exited := false
-				select {
-				case <-noExitCheck:
-				case <-done:
-					exited = true
-				}
-
-				Expect(exited).To(BeTrue())
+				Eventually(done).WithTimeout(3 * time.Second).WithPolling(100 * time.Millisecond).Should(Receive())
 			})
 
 			It("verify monitor loop exits when signal arrives and no pid is present", func() {
@@ -186,6 +149,7 @@ var _ = Describe("VirtLauncher", func() {
 				done := make(chan string)
 
 				go func() {
+					defer GinkgoRecover()
 					mon.monitorLoop(1*time.Second, stopChan)
 					done <- "exit"
 				}()
@@ -193,16 +157,9 @@ var _ = Describe("VirtLauncher", func() {
 				time.Sleep(time.Second)
 
 				close(stopChan)
-				noExitCheck := time.After(5 * time.Second)
-				exited := false
 
-				select {
-				case <-noExitCheck:
-				case <-done:
-					exited = true
-				}
-
-				Expect(exited).To(BeTrue())
+				Eventually(done).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(
+					Receive())
 			})
 
 			It("verify graceful shutdown trigger works", func() {
@@ -211,9 +168,9 @@ var _ = Describe("VirtLauncher", func() {
 
 				StartProcess()
 				VerifyProcessStarted()
-				go func() { CleanupProcess() }()
 
 				go func() {
+					defer GinkgoRecover()
 					mon.monitorLoop(1*time.Second, stopChan)
 					done <- "exit"
 				}()
@@ -229,24 +186,15 @@ var _ = Describe("VirtLauncher", func() {
 
 				StartProcess()
 				VerifyProcessStarted()
-				go func() { CleanupProcess() }()
 				go func() {
+					defer GinkgoRecover()
 					mon.gracePeriod = 1
 					mon.monitorLoop(1*time.Second, stopChan)
 					done <- "exit"
 				}()
 
 				close(stopChan)
-				noExitCheck := time.After(10 * time.Second)
-				exited := false
-
-				select {
-				case <-noExitCheck:
-				case <-done:
-					exited = true
-				}
-
-				Expect(exited).To(BeTrue())
+				Eventually(done).WithTimeout(10 * time.Second).WithPolling(100 * time.Millisecond).Should(Receive())
 			})
 		})
 	})

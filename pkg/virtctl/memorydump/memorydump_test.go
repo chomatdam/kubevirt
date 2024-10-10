@@ -24,11 +24,11 @@ import (
 	"k8s.io/client-go/testing"
 
 	v1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1alpha1"
-	cdifake "kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned/fake"
-	kubevirtfake "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/fake"
+	exportv1 "kubevirt.io/api/export/v1beta1"
+	cdifake "kubevirt.io/client-go/containerized-data-importer/fake"
 	"kubevirt.io/client-go/kubecli"
-	"kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
+	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
+	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	"kubevirt.io/kubevirt/pkg/virtctl/memorydump"
 	"kubevirt.io/kubevirt/pkg/virtctl/utils"
@@ -77,8 +77,8 @@ var _ = Describe("MemoryDump", func() {
 	updateCDIConfig := func() {
 		config, err := cdiClient.CdiV1beta1().CDIConfigs().Get(context.Background(), configName, k8smetav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
-		config.Status.FilesystemOverhead.StorageClass = make(map[string]v1beta1.Percent)
-		config.Status.FilesystemOverhead.StorageClass["fakeSC"] = v1beta1.Percent("0.1")
+		config.Status.FilesystemOverhead.StorageClass = make(map[string]cdiv1.Percent)
+		config.Status.FilesystemOverhead.StorageClass["fakeSC"] = cdiv1.Percent("0.1")
 		_, err = cdiClient.CdiV1beta1().CDIConfigs().Update(context.Background(), config, k8smetav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 	}
@@ -209,9 +209,9 @@ var _ = Describe("MemoryDump", func() {
 		Expect(res).To(HaveOccurred())
 		Expect(res.Error()).To(ContainSubstring(errorString))
 	},
-		Entry("memorydump no args", "argument validation failed"),
-		Entry("memorydump missing action arg", "argument validation failed", "testvm"),
-		Entry("memorydump missing vm name arg", "argument validation failed", "get"),
+		Entry("memorydump no args", "accepts 2 arg(s), received 0"),
+		Entry("memorydump missing action arg", "accepts 2 arg(s), received 1", "testvm"),
+		Entry("memorydump missing vm name arg", "accepts 2 arg(s), received 1", "get"),
 		Entry("memorydump wrong action arg", "invalid action type create", "create", "testvm"),
 		Entry("memorydump name, invalid extra parameter", "unknown flag", "testvm", "--claim-name=blah", "--invalid=test"),
 		Entry("memorydump download missing outputFile", "missing outputFile", "download", "testvm", "--claim-name=pvc"),
@@ -261,7 +261,7 @@ var _ = Describe("MemoryDump", func() {
 	It("should fail call memory dump subresource with create-claim no vmi", func() {
 		expectGetVMNoAssociatedMemoryDump()
 		kubecli.MockKubevirtClientInstance.EXPECT().VirtualMachineInstance(k8smetav1.NamespaceDefault).Return(vmiInterface).Times(1)
-		vmiInterface.EXPECT().Get(context.Background(), vmName, &k8smetav1.GetOptions{}).Return(nil, errors.NewNotFound(v1.Resource("virtualmachineinstance"), vmName))
+		vmiInterface.EXPECT().Get(context.Background(), vmName, k8smetav1.GetOptions{}).Return(nil, errors.NewNotFound(v1.Resource("virtualmachineinstance"), vmName))
 		commandAndArgs := []string{"memory-dump", "get", "testvm", claimNameFlag, createClaimFlag}
 		cmd := clientcmd.NewVirtctlCommand(commandAndArgs...)
 		res := cmd.Execute()
@@ -355,27 +355,31 @@ var _ = Describe("MemoryDump", func() {
 			vmExportClient = kubevirtfake.NewSimpleClientset()
 
 			kubecli.MockKubevirtClientInstance.EXPECT().StorageV1().Return(coreClient.StorageV1()).AnyTimes()
-			kubecli.MockKubevirtClientInstance.EXPECT().VirtualMachineExport(k8smetav1.NamespaceDefault).Return(vmExportClient.ExportV1alpha1().VirtualMachineExports(k8smetav1.NamespaceDefault)).AnyTimes()
+			kubecli.MockKubevirtClientInstance.EXPECT().VirtualMachineExport(k8smetav1.NamespaceDefault).Return(vmExportClient.ExportV1beta1().VirtualMachineExports(k8smetav1.NamespaceDefault)).AnyTimes()
 			addDefaultReactors()
 
 			server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}))
 
-			vmexport.ExportProcessingComplete = utils.WaitExportCompleteDefault
-			vmexport.SetHTTPClientCreator(func(*http.Transport, bool) *http.Client {
+			vmexport.WaitForVirtualMachineExportFn = func(_ kubecli.KubevirtClient, _ *vmexport.VMExportInfo, _, _ time.Duration) error {
+				return nil
+			}
+			vmexport.GetHTTPClientFn = func(*http.Transport, bool) *http.Client {
 				return server.Client()
-			})
-			vmexport.SetPortForwarder(func(client kubecli.KubevirtClient, pod k8sv1.Pod, namespace string, ports []string, stopChan, readyChan chan struct{}, portChan chan uint16) error {
+			}
+			vmexport.RunPortForwardFn = func(client kubecli.KubevirtClient, pod k8sv1.Pod, namespace string, ports []string, stopChan, readyChan chan struct{}, portChan chan uint16) error {
 				readyChan <- struct{}{}
 				portChan <- uint16(5432)
 				return nil
-			})
+			}
 		})
 
 		AfterEach(func() {
-			vmexport.SetDefaultPortForwarder()
-			vmexport.SetDefaultHTTPClientCreator()
+			vmexport.WaitForVirtualMachineExportFn = vmexport.WaitForVirtualMachineExport
+			vmexport.GetHTTPClientFn = vmexport.GetHTTPClient
+			vmexport.HandleHTTPGetRequestFn = vmexport.HandleHTTPGetRequest
+			vmexport.RunPortForwardFn = vmexport.RunPortForward
 		})
 
 		It("should get memory dump and call download memory dump", func() {
@@ -415,7 +419,7 @@ var _ = Describe("MemoryDump", func() {
 		})
 
 		It("should call download memory dump and decompress succesfully", func() {
-			vmexport.HandleHTTPRequest = func(client kubecli.KubevirtClient, vmexport *exportv1.VirtualMachineExport, downloadUrl string, insecure bool, exportURL string, headers map[string]string) (*http.Response, error) {
+			vmexport.HandleHTTPGetRequestFn = func(client kubecli.KubevirtClient, vmexport *exportv1.VirtualMachineExport, downloadUrl string, insecure bool, exportURL string, headers map[string]string) (*http.Response, error) {
 				resp := http.Response{
 					StatusCode: http.StatusOK,
 					Body: io.NopCloser(bytes.NewReader([]byte{
@@ -452,7 +456,7 @@ var _ = Describe("MemoryDump", func() {
 		})
 
 		DescribeTable("should call download memory dump with port-forward", func(commandAndArgs []string) {
-			vmexport.HandleHTTPRequest = func(client kubecli.KubevirtClient, vmexport *exportv1.VirtualMachineExport, downloadUrl string, insecure bool, exportURL string, headers map[string]string) (*http.Response, error) {
+			vmexport.HandleHTTPGetRequestFn = func(client kubecli.KubevirtClient, vmexport *exportv1.VirtualMachineExport, downloadUrl string, insecure bool, exportURL string, headers map[string]string) (*http.Response, error) {
 				Expect(downloadUrl).To(Equal("https://127.0.0.1:5432"))
 				resp := http.Response{
 					StatusCode: http.StatusOK,
@@ -493,17 +497,17 @@ var _ = Describe("MemoryDump", func() {
 	})
 })
 
-func cdiConfigInit() (cdiConfig *v1beta1.CDIConfig) {
-	cdiConfig = &v1beta1.CDIConfig{
+func cdiConfigInit() (cdiConfig *cdiv1.CDIConfig) {
+	cdiConfig = &cdiv1.CDIConfig{
 		ObjectMeta: k8smetav1.ObjectMeta{
 			Name: configName,
 		},
-		Spec: v1beta1.CDIConfigSpec{
+		Spec: cdiv1.CDIConfigSpec{
 			UploadProxyURLOverride: nil,
 		},
-		Status: v1beta1.CDIConfigStatus{
-			FilesystemOverhead: &v1beta1.FilesystemOverhead{
-				Global: v1beta1.Percent(defaultFSOverhead),
+		Status: cdiv1.CDIConfigStatus{
+			FilesystemOverhead: &cdiv1.FilesystemOverhead{
+				Global: cdiv1.Percent(defaultFSOverhead),
 			},
 		},
 	}

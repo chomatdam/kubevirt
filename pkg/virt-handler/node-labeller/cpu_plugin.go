@@ -24,14 +24,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/api"
 	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 )
 
@@ -39,18 +36,10 @@ const (
 	isSupported            string = "yes"
 	isUnusable             string = "no"
 	isRequired             string = "require"
-	nodeLabellerVolumePath        = "/var/lib/kubevirt-node-labeller/"
+	NodeLabellerVolumePath        = "/var/lib/kubevirt-node-labeller/"
 
 	supportedFeaturesXml = "supported_features.xml"
 )
-
-func (n *NodeLabeller) getMinCpuFeature() cpuFeatures {
-	minCPUModel := n.clusterConfig.GetMinCPUModel()
-	if minCPUModel == "" {
-		minCPUModel = util.DefaultMinCPUModel
-	}
-	return n.cpuInfo.usableModels[minCPUModel]
-}
 
 func (n *NodeLabeller) getSupportedCpuModels(obsoleteCPUsx86 map[string]bool) []string {
 	supportedCPUModels := make([]string, 0)
@@ -93,12 +82,16 @@ func (n *NodeLabeller) loadDomCapabilities() error {
 	usableModels := make([]string, 0)
 	for _, mode := range hostDomCapabilities.CPU.Mode {
 		if mode.Name == v1.CPUModeHostModel {
-			if virtconfig.IsARM64(runtime.GOARCH) {
+			if virtconfig.IsARM64(n.arch) {
 				log.Log.Warning("host-model cpu mode is not supported for ARM architecture")
 				continue
 			}
 
 			n.cpuModelVendor = mode.Vendor.Name
+			// On s390x the xml does not include a CPU Vendor, however there is only one company selling them anyway.
+			if virtconfig.IsS390X(n.arch) && n.cpuModelVendor == "" {
+				n.cpuModelVendor = "IBM"
+			}
 
 			if len(mode.Model) < 1 {
 				return fmt.Errorf("host model mode is expected to contain a model")
@@ -144,54 +137,13 @@ func (n *NodeLabeller) loadHostSupportedFeatures() error {
 
 	usableFeatures := make([]string, 0)
 	for _, f := range hostFeatures.Feature {
-		if f.Policy != util.RequirePolicy {
-			continue
+		// On s390x, the policy is not set
+		if f.Policy == util.RequirePolicy || (virtconfig.IsS390X(n.arch) && f.Policy == "") {
+			usableFeatures = append(usableFeatures, f.Name)
 		}
-
-		usableFeatures = append(usableFeatures, f.Name)
 	}
 
 	n.supportedFeatures = usableFeatures
-	return nil
-}
-
-func (n *NodeLabeller) loadHostCapabilities() error {
-	capsFile := filepath.Join(n.volumePath, "capabilities.xml")
-	n.capabilities = &api.Capabilities{}
-	err := n.getStructureFromXMLFile(capsFile, n.capabilities)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// loadCPUInfo load info about all cpu models
-func (n *NodeLabeller) loadCPUInfo() error {
-	files, err := os.ReadDir(filepath.Join(n.volumePath, "cpu_map"))
-	if err != nil {
-		return err
-	}
-
-	models := make(map[string]cpuFeatures)
-	archPrefix, ok := util.DefaultArchitecturePrefix[runtime.GOARCH]
-	// Only arm64 and amd64 architectures are currently supported.
-	if !ok {
-		return fmt.Errorf("unsupported system architecture")
-	}
-	for _, f := range files {
-		fileName := f.Name()
-		if strings.HasPrefix(fileName, archPrefix) {
-			features, err := n.loadFeatures(fileName)
-			if err != nil {
-				return err
-			}
-			cpuName := strings.TrimSuffix(strings.TrimPrefix(fileName, archPrefix), ".xml")
-
-			models[cpuName] = features
-		}
-	}
-
-	n.cpuInfo.usableModels = models
 	return nil
 }
 
@@ -210,31 +162,6 @@ func (n *NodeLabeller) getDomCapabilities() (HostDomCapabilities, error) {
 	}
 
 	return hostDomCapabilities, err
-}
-
-// LoadFeatures loads features for given cpu name
-func (n *NodeLabeller) loadFeatures(fileName string) (cpuFeatures, error) {
-	if fileName == "" {
-		return nil, fmt.Errorf("file name can't be empty")
-	}
-
-	cpuFeaturepath := getPathCPUFeatures(n.volumePath, fileName)
-	features := FeatureModel{}
-	err := n.getStructureFromXMLFile(cpuFeaturepath, &features)
-	if err != nil {
-		return nil, err
-	}
-
-	modelFeatures := cpuFeatures{}
-	for _, f := range features.Model.Features {
-		modelFeatures[f.Name] = true
-	}
-	return modelFeatures, nil
-}
-
-// getPathCPUFeatures creates path where folder with cpu models is
-func getPathCPUFeatures(volumePath string, name string) string {
-	return filepath.Join(volumePath, "cpu_map", name)
 }
 
 // GetStructureFromXMLFile load data from xml file and unmarshals them into given structure

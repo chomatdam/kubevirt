@@ -42,10 +42,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/pointer"
-
 	virtv1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1alpha1"
+	exportv1 "kubevirt.io/api/export/v1beta1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
@@ -55,7 +53,9 @@ import (
 	"kubevirt.io/kubevirt/pkg/certificates/triple/cert"
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/instancetype"
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/storage/snapshot"
+	"kubevirt.io/kubevirt/pkg/storage/status"
 	"kubevirt.io/kubevirt/pkg/storage/types"
 	kutil "kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -63,6 +63,7 @@ import (
 	watchutil "kubevirt.io/kubevirt/pkg/virt-controller/watch/util"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/apply"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
+	optutil "kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
 
 const (
@@ -125,6 +126,9 @@ const (
 	internalHostKey        = "internal_host"
 	externalCaConfigMapKey = "external_ca_cm"
 	internalCaConfigMapKey = "internal_ca_cm"
+
+	// ReadinessPath is the endpoint used to check the readiness probe
+	ReadinessPath = "/exportready"
 )
 
 // variable so can be overridden in tests
@@ -212,6 +216,8 @@ type VMExportController struct {
 	clusterConfig *virtconfig.ClusterConfig
 
 	instancetypeMethods instancetype.Methods
+
+	statusUpdater *status.VMExportStatusUpdater
 }
 
 type CertParams struct {
@@ -342,6 +348,8 @@ func (ctrl *VMExportController) Init() error {
 		ControllerRevisionStore:  ctrl.ControllerRevisionInformer.GetStore(),
 		Clientset:                ctrl.Client,
 	}
+
+	ctrl.statusUpdater = status.NewVMExportStatusUpdater(ctrl.Client)
 
 	initCert(ctrl)
 	return nil
@@ -636,7 +644,7 @@ func (ctrl *VMExportController) createCertSecret(vmExport *exportv1.VirtualMachi
 	_, err = ctrl.Client.CoreV1().Secrets(vmExport.Namespace).Create(context.Background(), secret, metav1.CreateOptions{})
 	if err != nil && !errors.IsAlreadyExists(err) {
 		return err
-	} else {
+	} else if err == nil {
 		log.Log.V(3).Infof("Created new exporter pod secret")
 		ctrl.Recorder.Eventf(vmExport, corev1.EventTypeNormal, secretCreatedEvent, "Created exporter pod secret")
 	}
@@ -868,8 +876,8 @@ func (ctrl *VMExportController) createExporterPodManifest(vmExport *exportv1.Vir
 	podManifest.Labels = map[string]string{exportServiceLabel: vmExport.Name}
 	podManifest.Annotations = map[string]string{annCertParams: scp}
 	podManifest.Spec.SecurityContext = &corev1.PodSecurityContext{
-		RunAsNonRoot:   pointer.Bool(true),
-		FSGroup:        pointer.Int64Ptr(kvm),
+		RunAsNonRoot:   pointer.P(true),
+		FSGroup:        pointer.P(int64(kvm)),
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 	for i, pvc := range pvcs {
@@ -949,6 +957,21 @@ func (ctrl *VMExportController) createExporterPodManifest(vmExport *exportv1.Vir
 		Name:      tokenSecretRef,
 		MountPath: "/token",
 	})
+
+	podManifest.Spec.Containers[0].ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Scheme: corev1.URISchemeHTTPS,
+				Path:   ReadinessPath,
+				Port: intstr.IntOrString{
+					Type:   intstr.Int,
+					IntVal: 8443,
+				},
+			},
+		},
+		InitialDelaySeconds: 5,
+		PeriodSeconds:       5,
+	}
 
 	if vm, err := ctrl.getVmFromExport(vmExport); err != nil {
 		return nil, err
@@ -1155,7 +1178,7 @@ func (ctrl *VMExportController) updateCommonVMExportStatusFields(vmExport, vmExp
 		vmExportCopy.Status.Conditions = updateCondition(vmExportCopy.Status.Conditions, newReadyCondition(corev1.ConditionFalse, inUseReason, sourceVolumes.availableMessage))
 		vmExportCopy.Status.Phase = exportv1.Pending
 	} else {
-		if exporterPod.Status.Phase == corev1.PodRunning {
+		if optutil.PodIsReady(exporterPod) {
 			vmExportCopy.Status.Conditions = updateCondition(vmExportCopy.Status.Conditions, newReadyCondition(corev1.ConditionTrue, podReadyReason, ""))
 			vmExportCopy.Status.Phase = exportv1.Ready
 			vmExportCopy.Status.Links.Internal, err = ctrl.getInteralLinks(sourceVolumes.volumes, exporterPod, service, getVolumeName, vmExport)
@@ -1183,7 +1206,7 @@ func (ctrl *VMExportController) updateCommonVMExportStatusFields(vmExport, vmExp
 
 func (ctrl *VMExportController) updateVMExportStatus(vmExport, vmExportCopy *exportv1.VirtualMachineExport) error {
 	if !equality.Semantic.DeepEqual(vmExport.Status, vmExportCopy.Status) {
-		if _, err := ctrl.Client.VirtualMachineExport(vmExportCopy.Namespace).Update(context.Background(), vmExportCopy, metav1.UpdateOptions{}); err != nil {
+		if err := ctrl.statusUpdater.UpdateStatus(vmExportCopy); err != nil {
 			return err
 		}
 	}
@@ -1350,13 +1373,13 @@ func (ctrl *VMExportController) updateHttpSourceDataVolumeTemplate(vm *virtv1.Vi
 			volumeName = volume.PersistentVolumeClaim.ClaimName
 		}
 		if volumeName != "" {
-			vm.Spec.DataVolumeTemplates = ctrl.replaceUrlDVTemplate(volumeName, vm.Namespace, vm.Spec.DataVolumeTemplates)
+			vm.Spec.DataVolumeTemplates = ctrl.replaceUrlDVTemplate(volumeName, vm.Spec.DataVolumeTemplates)
 		}
 	}
 	return vm
 }
 
-func (ctrl *VMExportController) replaceUrlDVTemplate(volumeName, namespace string, templates []virtv1.DataVolumeTemplateSpec) []virtv1.DataVolumeTemplateSpec {
+func (ctrl *VMExportController) replaceUrlDVTemplate(volumeName string, templates []virtv1.DataVolumeTemplateSpec) []virtv1.DataVolumeTemplateSpec {
 	res := make([]virtv1.DataVolumeTemplateSpec, 0)
 	for _, template := range templates {
 		if template.ObjectMeta.Name == volumeName {
@@ -1367,6 +1390,7 @@ func (ctrl *VMExportController) replaceUrlDVTemplate(volumeName, namespace strin
 					URL: "",
 				},
 			}
+			replacement.Spec.SourceRef = nil
 			res = append(res, *replacement)
 		} else {
 			res = append(res, template)

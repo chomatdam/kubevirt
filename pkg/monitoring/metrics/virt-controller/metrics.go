@@ -27,6 +27,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
+	"kubevirt.io/kubevirt/pkg/monitoring/metrics/common/client"
+	"kubevirt.io/kubevirt/pkg/monitoring/metrics/common/workqueue"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
@@ -35,6 +37,8 @@ var (
 		componentMetrics,
 		migrationMetrics,
 		perfscaleMetrics,
+		vmiMetrics,
+		vmSnapshotMetrics,
 	}
 
 	vmInformer                  cache.SharedIndexInformer
@@ -66,6 +70,14 @@ func SetupMetrics(
 	vmiMigrationInformer = vmiMigration
 	clusterConfig = virtClusterConfig
 
+	if err := client.SetupMetrics(); err != nil {
+		return err
+	}
+
+	if err := workqueue.SetupMetrics(); err != nil {
+		return err
+	}
+
 	if err := operatormetrics.RegisterMetrics(metrics...); err != nil {
 		return err
 	}
@@ -77,6 +89,14 @@ func SetupMetrics(
 	)
 }
 
+func RegisterLeaderMetrics() error {
+	if err := operatormetrics.RegisterMetrics(leaderMetrics); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func UpdateVMIMigrationInformer(informer cache.SharedIndexInformer) {
 	vmiMigrationInformer = informer
 }
@@ -85,7 +105,7 @@ func ListMetrics() []operatormetrics.Metric {
 	return operatormetrics.ListMetrics()
 }
 
-func phaseTransitionTimeBuckets() []float64 {
+func PhaseTransitionTimeBuckets() []float64 {
 	return []float64{
 		(0.5 * time.Second.Seconds()),
 		(1 * time.Second.Seconds()),

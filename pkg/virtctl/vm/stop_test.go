@@ -50,7 +50,7 @@ var _ = Describe("Stop command", func() {
 		cmd := clientcmd.NewRepeatableVirtctlCommand("stop")
 		err := cmd()
 		Expect(err).To(HaveOccurred())
-		Expect(err).Should(MatchError("argument validation failed"))
+		Expect(err).Should(MatchError("accepts 1 arg(s), received 0"))
 	})
 
 	It("with dry-run parameter should not stop VM", func() {
@@ -73,7 +73,7 @@ var _ = Describe("Stop command", func() {
 			GracePeriod: &gracePeriod,
 			DryRun:      nil,
 		}
-		vmInterface.EXPECT().ForceStop(context.Background(), vm.Name, &stopOptions).Return(nil).Times(1)
+		vmInterface.EXPECT().Stop(context.Background(), vm.Name, &stopOptions).Return(nil).Times(1)
 
 		cmd := clientcmd.NewRepeatableVirtctlCommand("stop", vmName, "--force", "--grace-period=0")
 		Expect(cmd()).To(Succeed())

@@ -23,14 +23,14 @@ import (
 	"k8s.io/client-go/testing"
 
 	instancetypeapi "kubevirt.io/api/instancetype"
-	fakecdiclient "kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned/fake"
+	fakecdiclient "kubevirt.io/client-go/containerized-data-importer/fake"
 	"kubevirt.io/client-go/kubecli"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	"kubevirt.io/kubevirt/pkg/virtctl/imageupload"
 	"kubevirt.io/kubevirt/pkg/virtctl/utils"
-	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/clientcmd"
+	"kubevirt.io/kubevirt/tests/libstorage"
 )
 
 const (
@@ -49,6 +49,7 @@ const (
 	targetNamespace         = "default"
 	targetName              = "test-volume"
 	pvcSize                 = "500Mi"
+	dvSize                  = "500Mi"
 	configName              = "config"
 	defaultInstancetypeName = "instancetype"
 	defaultInstancetypeKind = "VirtualMachineInstancetype"
@@ -91,7 +92,7 @@ var _ = Describe("ImageUpload", func() {
 		defer archiveFile.Close()
 		archiveFilePath = archiveFile.Name()
 
-		tests.ArchiveToFile(archiveFile, imagePath)
+		libstorage.ArchiveToFile(archiveFile, imagePath)
 	})
 
 	AfterEach(func() {
@@ -109,7 +110,7 @@ var _ = Describe("ImageUpload", func() {
 				Annotations: map[string]string{},
 			},
 			Spec: v1.PersistentVolumeClaimSpec{
-				Resources: v1.ResourceRequirements{
+				Resources: v1.VolumeResourceRequirements{
 					Requests: v1.ResourceList{
 						v1.ResourceStorage: quantity,
 					},
@@ -129,7 +130,7 @@ var _ = Describe("ImageUpload", func() {
 				Namespace: "default",
 			},
 			Spec: v1.PersistentVolumeClaimSpec{
-				Resources: v1.ResourceRequirements{
+				Resources: v1.VolumeResourceRequirements{
 					Requests: v1.ResourceList{
 						v1.ResourceStorage: quantity,
 					},
@@ -700,6 +701,73 @@ var _ = Describe("ImageUpload", func() {
 			validatePVCDefaultInstancetypeLabels()
 		})
 
+		It("Should create DataSource pointing to the PVC", func() {
+			testInit(http.StatusOK)
+			cmd := clientcmd.NewRepeatableVirtctlCommand(
+				commandName, "dv", targetName,
+				"--size", dvSize,
+				"--uploadproxy-url", server.URL,
+				"--insecure",
+				"--force-bind",
+				"--datasource",
+				"--image-path", imagePath,
+				"--default-instancetype", "fake.large",
+				"--default-instancetype-kind", "fake.large",
+				"--default-preference", "fake.centos",
+				"--default-preference-kind", "fake.centos",
+			)
+			Expect(cmd()).To(Succeed())
+			Expect(pvcCreateCalled.IsTrue()).To(BeTrue())
+
+			ds, err := cdiClient.CdiV1beta1().DataSources(targetNamespace).Get(context.Background(), targetName, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+
+			assertDataSource(ds, targetName, targetNamespace)
+		})
+
+		It("Should patch DataSource pointing to the PVC", func() {
+			testInit(http.StatusOK)
+
+			ds := &cdiv1.DataSource{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      targetName,
+					Namespace: targetNamespace,
+					Labels:    map[string]string{},
+				},
+				Spec: cdiv1.DataSourceSpec{
+					Source: cdiv1.DataSourceSource{
+						PVC: &cdiv1.DataVolumeSourcePVC{
+							Name:      "",
+							Namespace: "",
+						},
+					},
+				},
+			}
+			_, err := cdiClient.CdiV1beta1().DataSources(targetNamespace).Create(context.Background(), ds, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+
+			cmd := clientcmd.NewRepeatableVirtctlCommand(
+				commandName, "dv", targetName,
+				"--size", dvSize,
+				"--uploadproxy-url", server.URL,
+				"--insecure",
+				"--force-bind",
+				"--datasource",
+				"--image-path", imagePath,
+				"--default-instancetype", "fake.large",
+				"--default-instancetype-kind", "fake.large",
+				"--default-preference", "fake.centos",
+				"--default-preference-kind", "fake.centos",
+			)
+			Expect(cmd()).To(Succeed())
+			Expect(pvcCreateCalled.IsTrue()).To(BeTrue())
+
+			ds, err = cdiClient.CdiV1beta1().DataSources(targetNamespace).Get(context.Background(), targetName, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+
+			assertDataSource(ds, targetName, targetNamespace)
+		})
+
 		AfterEach(func() {
 			testDone()
 		})
@@ -935,4 +1003,14 @@ func getVolumeMode(dvSpec cdiv1.DataVolumeSpec) *v1.PersistentVolumeMode {
 		return dvSpec.PVC.VolumeMode
 	}
 	return dvSpec.Storage.VolumeMode
+}
+
+func assertDataSource(ds *cdiv1.DataSource, targetName, targetNamespace string) {
+	Expect(ds.Labels).To(HaveKeyWithValue(instancetypeapi.DefaultInstancetypeLabel, "fake.large"))
+	Expect(ds.Labels).To(HaveKeyWithValue(instancetypeapi.DefaultInstancetypeKindLabel, "fake.large"))
+	Expect(ds.Labels).To(HaveKeyWithValue(instancetypeapi.DefaultPreferenceLabel, "fake.centos"))
+	Expect(ds.Labels).To(HaveKeyWithValue(instancetypeapi.DefaultPreferenceKindLabel, "fake.centos"))
+	Expect(ds.Spec.Source.PVC).ToNot(BeNil())
+	Expect(ds.Spec.Source.PVC.Name).To(Equal(targetName))
+	Expect(ds.Spec.Source.PVC.Namespace).To(Equal(targetNamespace))
 }

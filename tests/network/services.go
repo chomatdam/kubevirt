@@ -25,26 +25,27 @@ import (
 	"strconv"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"kubevirt.io/kubevirt/tests/util"
 
 	batchv1 "k8s.io/api/batch/v1"
 	k8sv1 "k8s.io/api/core/v1"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/libvmi"
+
 	"kubevirt.io/kubevirt/tests/console"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/libnet/job"
 	netservice "kubevirt.io/kubevirt/tests/libnet/service"
 	"kubevirt.io/kubevirt/tests/libnet/vmnetserver"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 const (
@@ -67,7 +68,7 @@ var _ = SIGDescribe("Services", func() {
 		BeforeEach(func() {
 			libnet.SkipWhenClusterNotSupportIpv4()
 
-			inboundVMI = libvmi.NewCirros(
+			inboundVMI = libvmifact.NewCirros(
 				libvmi.WithInterface(libvmi.InterfaceDeviceWithBridgeBinding(v1.DefaultPodNetwork().Name)),
 				libvmi.WithNetwork(v1.DefaultPodNetwork()),
 				libvmi.WithLabel(selectorLabelKey, selectorLabelValue),
@@ -75,7 +76,7 @@ var _ = SIGDescribe("Services", func() {
 				libvmi.WithHostname("inbound"),
 			)
 			var err error
-			inboundVMI, err = kubevirt.Client().VirtualMachineInstance(util.NamespaceTestDefault).Create(context.Background(), inboundVMI)
+			inboundVMI, err = kubevirt.Client().VirtualMachineInstance(testsuite.NamespaceTestDefault).Create(context.Background(), inboundVMI, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			inboundVMI = libwait.WaitUntilVMIReady(inboundVMI, console.LoginToCirros)
@@ -141,14 +142,14 @@ var _ = SIGDescribe("Services", func() {
 		)
 
 		BeforeEach(func() {
-			inboundVMI = libvmi.NewFedora(append(
+			inboundVMI = libvmifact.NewFedora(
 				libnet.WithMasqueradeNetworking(),
 				libvmi.WithLabel(selectorLabelKey, selectorLabelValue),
 				libvmi.WithSubdomain("vmi"),
 				libvmi.WithHostname("inbound"),
-			)...)
+			)
 			var err error
-			inboundVMI, err = kubevirt.Client().VirtualMachineInstance(util.NamespaceTestDefault).Create(context.Background(), inboundVMI)
+			inboundVMI, err = kubevirt.Client().VirtualMachineInstance(testsuite.NamespaceTestDefault).Create(context.Background(), inboundVMI, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			inboundVMI = libwait.WaitUntilVMIReady(inboundVMI, console.LoginToFedora)

@@ -20,29 +20,27 @@
 package infrastructure
 
 import (
+	"context"
 	"time"
-
-	"kubevirt.io/kubevirt/tests/decorators"
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
-	"kubevirt.io/kubevirt/tests/testsuite"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"kubevirt.io/kubevirt/tests/framework/matcher"
-	"kubevirt.io/kubevirt/tests/libnode"
-	"kubevirt.io/kubevirt/tests/libreplicaset"
-
-	"kubevirt.io/kubevirt/tests/util"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests/libvmi"
-
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	"kubevirt.io/kubevirt/pkg/libvmi/replicaset"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
+	"kubevirt.io/kubevirt/tests/libnode"
+	"kubevirt.io/kubevirt/tests/libreplicaset"
+	"kubevirt.io/kubevirt/tests/libvmifact"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 var _ = DescribeInfra("changes to the kubernetes client", func() {
@@ -72,8 +70,8 @@ var _ = DescribeInfra("changes to the kubernetes client", func() {
 
 	It("on the controller rate limiter should lead to delayed VMI starts", func() {
 		By("first getting the basetime for a replicaset")
-		replicaset := tests.NewRandomReplicaSetFromVMI(libvmi.NewCirros(libvmi.WithResourceMemory("1Mi")), int32(0))
-		replicaset, err = virtClient.ReplicaSet(testsuite.GetTestNamespace(nil)).Create(replicaset)
+		replicaset := replicaset.New(libvmifact.NewCirros(libvmi.WithResourceMemory("1Mi")), 0)
+		replicaset, err = virtClient.ReplicaSet(testsuite.GetTestNamespace(nil)).Create(context.Background(), replicaset, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		start := time.Now()
 		libreplicaset.DoScaleWithScaleSubresource(virtClient, replicaset.Name, 10)
@@ -81,7 +79,7 @@ var _ = DescribeInfra("changes to the kubernetes client", func() {
 		libreplicaset.DoScaleWithScaleSubresource(virtClient, replicaset.Name, 0)
 
 		By("reducing the throughput on controller")
-		originalKubeVirt := util.GetCurrentKv(virtClient)
+		originalKubeVirt := libkubevirt.GetCurrentKv(virtClient)
 		originalKubeVirt.Spec.Configuration.ControllerConfiguration = &v1.ReloadableComponentConfiguration{
 			RestClient: &v1.RESTClientConfiguration{
 				RateLimiter: &v1.RateLimiter{
@@ -92,7 +90,7 @@ var _ = DescribeInfra("changes to the kubernetes client", func() {
 				},
 			},
 		}
-		tests.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
+		config.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
 		By("starting a replicaset with reduced throughput")
 		start = time.Now()
 		libreplicaset.DoScaleWithScaleSubresource(virtClient, replicaset.Name, 10)
@@ -100,16 +98,16 @@ var _ = DescribeInfra("changes to the kubernetes client", func() {
 		Expect(slowDuration.Seconds()).To(BeNumerically(">", 2*fastDuration.Seconds()))
 	})
 
-	It("[QUARANTINE] on the virt handler rate limiter should lead to delayed VMI running states", decorators.Quarantine, func() {
+	It("on the virt handler rate limiter should lead to delayed VMI running states", func() {
 		By("first getting the basetime for a replicaset")
 		targetNode := libnode.GetAllSchedulableNodes(virtClient).Items[0]
 		vmi := libvmi.New(
 			libvmi.WithResourceMemory("1Mi"),
-			libvmi.WithNodeSelectorFor(&targetNode),
+			libvmi.WithNodeSelectorFor(targetNode.Name),
 		)
 
-		replicaset := tests.NewRandomReplicaSetFromVMI(vmi, 0)
-		replicaset, err = virtClient.ReplicaSet(testsuite.GetTestNamespace(nil)).Create(replicaset)
+		replicaset := replicaset.New(vmi, 0)
+		replicaset, err = virtClient.ReplicaSet(testsuite.GetTestNamespace(nil)).Create(context.Background(), replicaset, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		libreplicaset.DoScaleWithScaleSubresource(virtClient, replicaset.Name, 10)
 		Eventually(matcher.AllVMIs(replicaset.Namespace), 90*time.Second, 1*time.Second).Should(matcher.BeInPhase(v1.Running))
@@ -121,7 +119,7 @@ var _ = DescribeInfra("changes to the kubernetes client", func() {
 		Eventually(matcher.AllVMIs(replicaset.Namespace), 90*time.Second, 1*time.Second).Should(matcher.BeGone())
 
 		By("reducing the throughput on handler")
-		originalKubeVirt := util.GetCurrentKv(virtClient)
+		originalKubeVirt := libkubevirt.GetCurrentKv(virtClient)
 		originalKubeVirt.Spec.Configuration.HandlerConfiguration = &v1.ReloadableComponentConfiguration{
 			RestClient: &v1.RESTClientConfiguration{
 				RateLimiter: &v1.RateLimiter{
@@ -132,7 +130,7 @@ var _ = DescribeInfra("changes to the kubernetes client", func() {
 				},
 			},
 		}
-		tests.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
+		config.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
 
 		By("starting a replicaset with reduced throughput")
 		libreplicaset.DoScaleWithScaleSubresource(virtClient, replicaset.Name, 10)

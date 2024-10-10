@@ -22,17 +22,10 @@ package network
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"os"
 	"strings"
 	"time"
-
-	"kubevirt.io/kubevirt/tests/testsuite"
-
-	"kubevirt.io/kubevirt/tests/libmigration"
-
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -40,12 +33,17 @@ import (
 	k8sv1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+
+	expect "github.com/google/goexpect"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
 	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	libvmici "kubevirt.io/kubevirt/pkg/libvmi/cloudinit"
 	"kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
 	"kubevirt.io/kubevirt/pkg/util/net/dns"
@@ -56,13 +54,16 @@ import (
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/exec"
 	"kubevirt.io/kubevirt/tests/framework/checks"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	"kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libmigration"
 	"kubevirt.io/kubevirt/tests/libnet"
 	netcloudinit "kubevirt.io/kubevirt/tests/libnet/cloudinit"
 	"kubevirt.io/kubevirt/tests/libnode"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libpod"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
-	"kubevirt.io/kubevirt/tests/util"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 const (
@@ -101,15 +102,13 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 
 	Context("VMI connected to single SRIOV network", func() {
 		BeforeEach(func() {
-			Expect(createSriovNetworkAttachmentDefinition(sriovnet1, util.NamespaceTestDefault, sriovConfNAD)).
+			Expect(createSriovNetworkAttachmentDefinition(sriovnet1, testsuite.NamespaceTestDefault, sriovConfNAD)).
 				To(Succeed(), shouldCreateNetwork)
 		})
 
 		It("should have cloud-init meta_data with aligned cpus to sriov interface numa node for VMIs with dedicatedCPUs", func() {
 			checks.SkipTestIfNoCPUManager()
-			noCloudInitNetworkData := ""
-			vmi := newSRIOVVmi([]string{sriovnet1}, noCloudInitNetworkData)
-			tests.AddCloudInitConfigDriveData(vmi, "disk1", "", defaultCloudInitNetworkData(), false)
+			vmi := newSRIOVVmi([]string{sriovnet1}, libvmi.WithCloudInitConfigDrive(libvmici.WithConfigDriveNetworkData(defaultCloudInitNetworkData())))
 			vmi.Spec.Domain.CPU = &v1.CPU{
 				Cores:                 4,
 				DedicatedCPUPlacement: true,
@@ -125,11 +124,9 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(deleteVMI, vmi)
 
-			domXml, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
+			domSpec, err := tests.GetRunningVMIDomainSpec(vmi)
 			Expect(err).ToNot(HaveOccurred())
 
-			domSpec := &api.DomainSpec{}
-			Expect(xml.Unmarshal([]byte(domXml), domSpec)).To(Succeed())
 			nic := domSpec.Devices.HostDevices[0]
 			// find the SRIOV interface
 			for _, iface := range domSpec.Devices.HostDevices {
@@ -152,7 +149,7 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 					AlignedCPUs: alignedCPUsInt,
 				},
 			}
-			vmi, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+			vmi, err = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Get(context.Background(), vmi.Name, k8smetav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			metadataStruct := cloudinit.ConfigDriveMetadata{
@@ -165,8 +162,7 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 			buf, err := json.Marshal(metadataStruct)
 			Expect(err).ToNot(HaveOccurred())
 			By("mouting cloudinit iso")
-			mountCloudInitConfigDrive := tests.MountCloudInitFunc("config-2")
-			mountCloudInitConfigDrive(vmi)
+			Expect(mountGuestDevice(vmi, "config-2")).To(Succeed())
 
 			By("checking cloudinit meta-data")
 			tests.CheckCloudInitMetaData(vmi, "openstack/latest/meta_data.json", string(buf))
@@ -174,14 +170,12 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 		})
 
 		It("should have cloud-init meta_data with tagged sriov nics", func() {
-			noCloudInitNetworkData := ""
-			vmi := newSRIOVVmi([]string{sriovnet1}, noCloudInitNetworkData)
+			vmi := newSRIOVVmi([]string{sriovnet1}, libvmi.WithCloudInitConfigDrive(libvmici.WithConfigDriveNetworkData(defaultCloudInitNetworkData())))
 			testInstancetype := "testInstancetype"
 			if vmi.Annotations == nil {
 				vmi.Annotations = make(map[string]string)
 			}
 			vmi.Annotations[v1.InstancetypeAnnotation] = testInstancetype
-			tests.AddCloudInitConfigDriveData(vmi, "disk1", "", defaultCloudInitNetworkData(), false)
 
 			for idx, iface := range vmi.Spec.Domain.Devices.Interfaces {
 				if iface.Name == sriovnet1 {
@@ -193,11 +187,9 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(deleteVMI, vmi)
 
-			domXml, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
+			domSpec, err := tests.GetRunningVMIDomainSpec(vmi)
 			Expect(err).ToNot(HaveOccurred())
 
-			domSpec := &api.DomainSpec{}
-			Expect(xml.Unmarshal([]byte(domXml), domSpec)).To(Succeed())
 			nic := domSpec.Devices.HostDevices[0]
 			// find the SRIOV interface
 			for _, iface := range domSpec.Devices.HostDevices {
@@ -215,7 +207,7 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 					Tags:    []string{"specialNet"},
 				},
 			}
-			vmi, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+			vmi, err = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Get(context.Background(), vmi.Name, k8smetav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			metadataStruct := cloudinit.ConfigDriveMetadata{
@@ -229,15 +221,14 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 			buf, err := json.Marshal(metadataStruct)
 			Expect(err).ToNot(HaveOccurred())
 			By("mouting cloudinit iso")
-			mountCloudInitConfigDrive := tests.MountCloudInitFunc("config-2")
-			mountCloudInitConfigDrive(vmi)
+			Expect(mountGuestDevice(vmi, "config-2")).To(Succeed())
 
 			By("checking cloudinit meta-data")
 			tests.CheckCloudInitMetaData(vmi, "openstack/latest/meta_data.json", string(buf))
 		})
 
 		It("[test_id:1754]should create a virtual machine with sriov interface", func() {
-			vmi := newSRIOVVmi([]string{sriovnet1}, defaultCloudInitNetworkData())
+			vmi := newSRIOVVmi([]string{sriovnet1}, libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(defaultCloudInitNetworkData())))
 			vmi, err := createVMIAndWait(vmi)
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(deleteVMI, vmi)
@@ -256,7 +247,7 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 		})
 
 		It("[test_id:1754]should create a virtual machine with sriov interface with all pci devices on the root bus", func() {
-			vmi := newSRIOVVmi([]string{sriovnet1}, defaultCloudInitNetworkData())
+			vmi := newSRIOVVmi([]string{sriovnet1}, libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(defaultCloudInitNetworkData())))
 			vmi.Annotations = map[string]string{
 				v1.PlacePCIDevicesOnRootComplex: "true",
 			}
@@ -287,7 +278,7 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 			checks.SkipTestIfNoCPUManager()
 			// In addition to verifying that we can start a VMI with CPU pinning
 			// this also tests if we've correctly calculated the overhead for VFIO devices.
-			vmi := newSRIOVVmi([]string{sriovnet1}, defaultCloudInitNetworkData())
+			vmi := newSRIOVVmi([]string{sriovnet1}, libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(defaultCloudInitNetworkData())))
 			vmi.Spec.Domain.CPU = &v1.CPU{
 				Cores:                 2,
 				DedicatedCPUPlacement: true,
@@ -306,7 +297,7 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 		})
 		It("[test_id:3985]should create a virtual machine with sriov interface with custom MAC address", func() {
 			const mac = "de:ad:00:00:be:ef"
-			vmi := newSRIOVVmi([]string{sriovnet1}, defaultCloudInitNetworkData())
+			vmi := newSRIOVVmi([]string{sriovnet1}, libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(defaultCloudInitNetworkData())))
 			vmi.Spec.Domain.Devices.Interfaces[1].MacAddress = mac
 
 			vmi, err := createVMIAndWait(vmi)
@@ -316,9 +307,9 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 			By("checking virtual machine instance has an interface with the requested MAC address")
 			ifaceName, err := findIfaceByMAC(virtClient, vmi, mac, 140*time.Second)
 			Expect(err).NotTo(HaveOccurred())
-			vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+			vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, k8smetav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(checkMacAddress(vmi, ifaceName, mac)).To(Succeed())
+			Expect(libnet.CheckMacAddress(vmi, ifaceName, mac)).To(Succeed())
 
 			By("checking virtual machine instance reports the expected network name")
 			Expect(getInterfaceNetworkNameByMAC(vmi, mac)).To(Equal(sriovnet1))
@@ -343,7 +334,7 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 
 			BeforeEach(func() {
 				// The SR-IOV VF MAC should be preserved on migration, therefore explicitly specify it.
-				vmi = newSRIOVVmi([]string{sriovnet1}, defaultCloudInitNetworkData())
+				vmi = newSRIOVVmi([]string{sriovnet1}, libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(defaultCloudInitNetworkData())))
 				vmi.Spec.Domain.Devices.Interfaces[1].MacAddress = mac
 
 				var err error
@@ -353,9 +344,9 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 
 				ifaceName, err := findIfaceByMAC(virtClient, vmi, mac, 30*time.Second)
 				Expect(err).NotTo(HaveOccurred())
-				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, k8smetav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
-				Expect(checkMacAddress(vmi, ifaceName, mac)).To(Succeed(), "SR-IOV VF is expected to exist in the guest")
+				Expect(libnet.CheckMacAddress(vmi, ifaceName, mac)).To(Succeed(), "SR-IOV VF is expected to exist in the guest")
 			})
 
 			It("should be successful with a running VMI on the target", func() {
@@ -368,22 +359,22 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 				// the guest-agent.
 				ifaceName, err := findIfaceByMAC(virtClient, vmi, mac, 30*time.Second)
 				Expect(err).NotTo(HaveOccurred())
-				updatedVMI, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+				updatedVMI, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, k8smetav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
-				Expect(checkMacAddress(updatedVMI, ifaceName, mac)).To(Succeed(), "SR-IOV VF is expected to exist in the guest after migration")
+				Expect(libnet.CheckMacAddress(updatedVMI, ifaceName, mac)).To(Succeed(), "SR-IOV VF is expected to exist in the guest after migration")
 			})
 		})
 	})
 
 	Context("VMI connected to two SRIOV networks", func() {
 		BeforeEach(func() {
-			Expect(createSriovNetworkAttachmentDefinition(sriovnet1, util.NamespaceTestDefault, sriovConfNAD)).To(Succeed(), shouldCreateNetwork)
-			Expect(createSriovNetworkAttachmentDefinition(sriovnet2, util.NamespaceTestDefault, sriovConfNAD)).To(Succeed(), shouldCreateNetwork)
+			Expect(createSriovNetworkAttachmentDefinition(sriovnet1, testsuite.NamespaceTestDefault, sriovConfNAD)).To(Succeed(), shouldCreateNetwork)
+			Expect(createSriovNetworkAttachmentDefinition(sriovnet2, testsuite.NamespaceTestDefault, sriovConfNAD)).To(Succeed(), shouldCreateNetwork)
 		})
 
 		It("[test_id:1755]should create a virtual machine with two sriov interfaces referring the same resource", func() {
 			sriovNetworks := []string{sriovnet1, sriovnet2}
-			vmi := newSRIOVVmi(sriovNetworks, defaultCloudInitNetworkData())
+			vmi := newSRIOVVmi(sriovNetworks, libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(defaultCloudInitNetworkData())))
 			vmi.Spec.Domain.Devices.Interfaces[1].PciAddress = "0000:06:00.0"
 			vmi.Spec.Domain.Devices.Interfaces[2].PciAddress = "0000:07:00.0"
 
@@ -410,14 +401,14 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 		sriovNetworks := []string{sriovnet1, sriovnet2, sriovnet3, sriovnet4}
 		BeforeEach(func() {
 			for _, sriovNetwork := range sriovNetworks {
-				Expect(createSriovNetworkAttachmentDefinition(sriovNetwork, util.NamespaceTestDefault, sriovConfNAD)).To(Succeed(), shouldCreateNetwork)
+				Expect(createSriovNetworkAttachmentDefinition(sriovNetwork, testsuite.NamespaceTestDefault, sriovConfNAD)).To(Succeed(), shouldCreateNetwork)
 			}
 		})
 
 		It("should correctly plug all the interfaces based on the specified MAC and (guest) PCI addresses", func() {
 			macAddressTemplate := "de:ad:00:be:ef:%02d"
 			pciAddressTemplate := "0000:2%d:00.0"
-			vmi := newSRIOVVmi(sriovNetworks, defaultCloudInitNetworkData())
+			vmi := newSRIOVVmi(sriovNetworks, libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(defaultCloudInitNetworkData())))
 			for i := range sriovNetworks {
 				secondaryInterfaceIdx := i + 1
 				vmi.Spec.Domain.Devices.Interfaces[secondaryInterfaceIdx].MacAddress = fmt.Sprintf(macAddressTemplate, secondaryInterfaceIdx)
@@ -448,7 +439,7 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 		})
 
 		BeforeEach(func() {
-			Expect(createSriovNetworkAttachmentDefinition(sriovnetLinkEnabled, util.NamespaceTestDefault, sriovLinkEnableConfNAD)).
+			Expect(createSriovNetworkAttachmentDefinition(sriovnetLinkEnabled, testsuite.NamespaceTestDefault, sriovLinkEnableConfNAD)).
 				To(Succeed(), shouldCreateNetwork)
 		})
 
@@ -492,7 +483,7 @@ var _ = Describe("[Serial]SRIOV", Serial, decorators.SRIOV, func() {
 				var err error
 				ipVlaned1, err = libnet.CidrToIP(cidrVlaned1)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(createSriovNetworkAttachmentDefinition(sriovnetVlanned, util.NamespaceTestDefault, sriovVlanConfNAD)).To(Succeed())
+				Expect(createSriovNetworkAttachmentDefinition(sriovnetVlanned, testsuite.NamespaceTestDefault, sriovVlanConfNAD)).To(Succeed())
 			})
 
 			It("should be able to ping between two VMIs with the same VLAN over SRIOV network", func() {
@@ -576,15 +567,15 @@ func getInterfaceNetworkNameByMAC(vmi *v1.VirtualMachineInstance, macAddress str
 }
 
 func validateSRIOVSetup(virtClient kubecli.KubevirtClient, sriovResourceName string, minRequiredNodes int) error {
-	sriovNodes := getNodesWithAllocatedResource(virtClient, sriovResourceName)
+	sriovNodes := getNodesWithAllocatedResource(sriovResourceName)
 	if len(sriovNodes) < minRequiredNodes {
 		return fmt.Errorf("not enough compute nodes with SR-IOV support detected")
 	}
 	return nil
 }
 
-func getNodesWithAllocatedResource(virtClient kubecli.KubevirtClient, resourceName string) []k8sv1.Node {
-	nodes := libnode.GetAllSchedulableNodes(virtClient)
+func getNodesWithAllocatedResource(resourceName string) []k8sv1.Node {
+	nodes := libnode.GetAllSchedulableNodes(kubevirt.Client())
 	filteredNodes := []k8sv1.Node{}
 	for _, node := range nodes.Items {
 		resourceList := node.Status.Allocatable
@@ -602,9 +593,11 @@ func getNodesWithAllocatedResource(virtClient kubecli.KubevirtClient, resourceNa
 }
 
 func validatePodKubevirtResourceNameByVMI(virtClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, networkName, sriovResourceName string) error {
+	pod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+	Expect(err).NotTo(HaveOccurred())
+
 	out, err := exec.ExecuteCommandOnPod(
-		virtClient,
-		tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace),
+		pod,
 		"compute",
 		[]string{"sh", "-c", fmt.Sprintf("echo $KUBEVIRT_RESOURCE_NAME_%s", networkName)},
 	)
@@ -628,7 +621,7 @@ func defaultCloudInitNetworkData() string {
 func findIfaceByMAC(virtClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, mac string, timeout time.Duration) (string, error) {
 	var ifaceName string
 	err := wait.Poll(timeout, 5*time.Second, func() (done bool, err error) {
-		vmi, err := virtClient.VirtualMachineInstance(vmi.GetNamespace()).Get(context.Background(), vmi.GetName(), &k8smetav1.GetOptions{})
+		vmi, err := virtClient.VirtualMachineInstance(vmi.GetNamespace()).Get(context.Background(), vmi.GetName(), k8smetav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -645,14 +638,10 @@ func findIfaceByMAC(virtClient kubecli.KubevirtClient, vmi *v1.VirtualMachineIns
 	return ifaceName, nil
 }
 
-func newSRIOVVmi(networks []string, cloudInitNetworkData string) *v1.VirtualMachineInstance {
+func newSRIOVVmi(networks []string, opts ...libvmi.Option) *v1.VirtualMachineInstance {
 	options := []libvmi.Option{
 		libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 		libvmi.WithNetwork(v1.DefaultPodNetwork()),
-	}
-	if cloudInitNetworkData != "" {
-		cloudinitOption := libvmi.WithCloudInitNoCloudNetworkData(cloudInitNetworkData)
-		options = append(options, cloudinitOption)
 	}
 
 	for _, name := range networks {
@@ -661,7 +650,8 @@ func newSRIOVVmi(networks []string, cloudInitNetworkData string) *v1.VirtualMach
 			libvmi.WithNetwork(libvmi.MultusNetwork(name, name)),
 		)
 	}
-	return libvmi.NewFedora(options...)
+	opts = append(options, opts...)
+	return libvmifact.NewFedora(opts...)
 }
 
 func checkInterfacesInGuest(vmi *v1.VirtualMachineInstance, interfaces []string) {
@@ -675,7 +665,7 @@ func createVMIAndWait(vmi *v1.VirtualMachineInstance) (*v1.VirtualMachineInstanc
 	virtClient := kubevirt.Client()
 
 	var err error
-	vmi, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(context.Background(), vmi)
+	vmi, err = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Create(context.Background(), vmi, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -684,17 +674,28 @@ func createVMIAndWait(vmi *v1.VirtualMachineInstance) (*v1.VirtualMachineInstanc
 }
 
 func waitVMI(vmi *v1.VirtualMachineInstance) (*v1.VirtualMachineInstance, error) {
-	// Running multi sriov jobs with Kind, DinD is resource extensive, causing DeadlineExceeded transient warning
-	// Kubevirt re-enqueue the request once it happens, so its safe to ignore this warning.
-	// see https://github.com/kubevirt/kubevirt/issues/5027
-	warningsIgnoreList := []string{"unknown error encountered sending command SyncVMI: rpc error: code = DeadlineExceeded desc = context deadline exceeded"}
+	warningsIgnoreList := []string{
+		// Running multi sriov jobs with Kind, DinD is resource extensive, causing DeadlineExceeded transient warning
+		// Kubevirt re-enqueue the request once it happens, so its safe to ignore this warning.
+		// see https://github.com/kubevirt/kubevirt/issues/5027
+		"unknown error encountered sending command SyncVMI: rpc error: code = DeadlineExceeded desc = context deadline exceeded",
+
+		// SR-IOV tests run on Kind cluster in a docker-in-docker CI environment which is resource extensive,
+		// causing general slowness in the cluster.
+		// It manifests having warning event raised due to SR-IOV VMs virt-launcher pod's SR-IOV network-pci-map
+		// downward API mount not become ready on time.
+		// Kubevirt re-enqueues such requests and eventually reconcile this state.
+		// Tacking issue: https://github.com/kubevirt/kubevirt/issues/12691
+		"failed to create SR-IOV hostdevices: failed to create PCI address pool with network status from file: timed out waiting for the condition: file is not populated with network-info",
+	}
+
 	libwait.WaitUntilVMIReady(vmi, console.LoginToFedora, libwait.WithWarningsIgnoreList(warningsIgnoreList))
 
 	virtClient := kubevirt.Client()
 
 	Eventually(matcher.ThisVMI(vmi), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
 
-	return virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+	return virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, k8smetav1.GetOptions{})
 }
 
 // deleteVMI deletes the specified VMI and waits for its absence.
@@ -705,7 +706,7 @@ func deleteVMI(vmi *v1.VirtualMachineInstance) error {
 	virtClient := kubevirt.Client()
 
 	GinkgoWriter.Println("sriov:", vmi.Name, "deletion started")
-	if err := virtClient.VirtualMachineInstance(vmi.Namespace).Delete(context.Background(), vmi.Name, &k8smetav1.DeleteOptions{}); err != nil {
+	if err := virtClient.VirtualMachineInstance(vmi.Namespace).Delete(context.Background(), vmi.Name, k8smetav1.DeleteOptions{}); err != nil {
 		if k8serrors.IsNotFound(err) {
 			return nil
 		}
@@ -714,7 +715,7 @@ func deleteVMI(vmi *v1.VirtualMachineInstance) error {
 
 	const timeout = 30 * time.Second
 	return wait.PollImmediate(1*time.Second, timeout, func() (done bool, err error) {
-		_, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+		_, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, k8smetav1.GetOptions{})
 		if k8serrors.IsNotFound(err) {
 			return true, nil
 		}
@@ -723,13 +724,11 @@ func deleteVMI(vmi *v1.VirtualMachineInstance) error {
 }
 
 func checkDefaultInterfaceInPod(vmi *v1.VirtualMachineInstance) error {
-	vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
-
-	virtClient := kubevirt.Client()
+	vmiPod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+	Expect(err).NotTo(HaveOccurred())
 
 	By("checking default interface is present")
-	_, err := exec.ExecuteCommandOnPod(
-		virtClient,
+	_, err = exec.ExecuteCommandOnPod(
 		vmiPod,
 		"compute",
 		[]string{"ip", "address", "show", "eth0"},
@@ -740,7 +739,6 @@ func checkDefaultInterfaceInPod(vmi *v1.VirtualMachineInstance) error {
 
 	By("checking default interface is attached to VMI")
 	_, err = exec.ExecuteCommandOnPod(
-		virtClient,
 		vmiPod,
 		"compute",
 		[]string{"ip", "address", "show", "k6t-eth0"},
@@ -760,33 +758,41 @@ func createSRIOVVmiOnNode(nodeName, networkName, cidr string) (*v1.VirtualMachin
 	//
 	// This step is needed to guarantee that no VFs on the PF carry a duplicate MAC address that may affect
 	// ability of VMIs to send and receive ICMP packets on their ports.
-	mac, err := GenerateRandomMac()
+	mac, err := libnet.GenerateRandomMac()
 	if err != nil {
 		return nil, err
 	}
 
 	// manually configure IP/link on sriov interfaces because there is
 	// no DHCP server to serve the address to the guest
-	vmi := newSRIOVVmi(
-		[]string{networkName},
-		netcloudinit.CreateNetworkDataWithStaticIPsByMac(networkName, mac.String(), cidr),
-	)
+	networkData := netcloudinit.CreateNetworkDataWithStaticIPsByMac(networkName, mac.String(), cidr)
+	vmi := newSRIOVVmi([]string{networkName}, libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(networkData)))
 	libvmi.WithNodeAffinityFor(nodeName)(vmi)
 	const secondaryInterfaceIndex = 1
 	vmi.Spec.Domain.Devices.Interfaces[secondaryInterfaceIndex].MacAddress = mac.String()
 
 	virtCli := kubevirt.Client()
-	vmi, err = virtCli.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
+	vmi, err = virtCli.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi, metav1.CreateOptions{})
 	ExpectWithOffset(1, err).ToNot(HaveOccurred())
 	return vmi, nil
 }
 
 func sriovNodeName(sriovResourceName string) (string, error) {
-	virtClient := kubevirt.Client()
-
-	sriovNodes := getNodesWithAllocatedResource(virtClient, sriovResourceName)
+	sriovNodes := getNodesWithAllocatedResource(sriovResourceName)
 	if len(sriovNodes) == 0 {
 		return "", fmt.Errorf("failed to detect nodes with allocatable resources (%s)", sriovResourceName)
 	}
 	return sriovNodes[0].Name, nil
+}
+
+func mountGuestDevice(vmi *v1.VirtualMachineInstance, devName string) error {
+	cmdCheck := fmt.Sprintf("mount $(blkid  -L %s) /mnt/\n", devName)
+	return console.SafeExpectBatch(vmi, []expect.Batcher{
+		&expect.BSnd{S: "sudo su -\n"},
+		&expect.BExp{R: console.PromptExpression},
+		&expect.BSnd{S: cmdCheck},
+		&expect.BExp{R: console.PromptExpression},
+		&expect.BSnd{S: console.EchoLastReturnValue},
+		&expect.BExp{R: console.RetValue("0")},
+	}, 15)
 }

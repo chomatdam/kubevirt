@@ -6,31 +6,28 @@ import (
 	"fmt"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/libnet"
-
-	"kubevirt.io/kubevirt/pkg/pointer"
-
-	v1 "kubevirt.io/api/core/v1"
-
-	util2 "kubevirt.io/kubevirt/tests/util"
-
-	"kubevirt.io/kubevirt/tests/libvmi"
-
-	"kubevirt.io/kubevirt/tests/testsuite"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	. "kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.SigComputeMigrations, decorators.RequiresTwoSchedulableNodes, decorators.VMLiveUpdateFeaturesGate, Serial, func() {
@@ -39,7 +36,7 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 	)
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
-		kv := util2.GetCurrentKv(virtClient)
+		kv := libkubevirt.GetCurrentKv(virtClient)
 		kv.Spec.Configuration.VMRolloutStrategy = pointer.P(v1.VMRolloutStrategyLiveUpdate)
 		testsuite.UpdateKubeVirtConfigValue(kv.Spec.Configuration)
 	})
@@ -56,7 +53,7 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 			}
 			patchData1Str := fmt.Sprintf(`[ {"op":"%s","path":"/spec/template/spec/nodeSelector"%s} ]`, op, value)
 			patchData1 := []byte(patchData1Str)
-			_, err = virtClient.VirtualMachine(vmNamespace).Patch(context.Background(), vmName, types.JSONPatchType, patchData1, &k8smetav1.PatchOptions{})
+			_, err = virtClient.VirtualMachine(vmNamespace).Patch(context.Background(), vmName, types.JSONPatchType, patchData1, k8smetav1.PatchOptions{})
 			Expect(err).ToNot(HaveOccurred())
 		}
 
@@ -76,7 +73,7 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 						NodeSelectorTerms: []k8sv1.NodeSelectorTerm{
 							{
 								MatchExpressions: []k8sv1.NodeSelectorRequirement{
-									{Key: "kubernetes.io/hostname", Operator: k8sv1.NodeSelectorOpIn, Values: []string{nodeName}},
+									{Key: k8sv1.LabelHostname, Operator: k8sv1.NodeSelectorOpIn, Values: []string{nodeName}},
 								},
 							},
 						},
@@ -95,26 +92,21 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 			}
 			patchData1Str := fmt.Sprintf(`[ {"op":"%s","path":"/spec/template/spec/affinity"%s} ]`, op, value)
 			patchData1 := []byte(patchData1Str)
-			fmt.Println("patchData1: ", string(patchData1))
-			_, err = virtClient.VirtualMachine(vmNamespace).Patch(context.Background(), vmName, types.JSONPatchType, patchData1, &k8smetav1.PatchOptions{})
+			_, err = virtClient.VirtualMachine(vmNamespace).Patch(context.Background(), vmName, types.JSONPatchType, patchData1, k8smetav1.PatchOptions{})
 			Expect(err).ToNot(HaveOccurred())
 		}
 
-		It("should successfully update node selector", func() {
+		It("[test_id:11208]should successfully update node selector", func() {
 
 			By("Creating a running VM")
-			options := libnet.WithMasqueradeNetworking()
-			options = append(options, libvmi.WithCPUCount(1, 2, 1))
-			vmi := libvmi.NewAlpineWithTestTooling(
-				options...,
-			)
+			vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking(), libvmi.WithCPUCount(1, 2, 1))
 			vmi.Namespace = testsuite.GetTestNamespace(vmi)
-			vm := libvmi.NewVirtualMachine(vmi, libvmi.WithRunning())
+			vm := libvmi.NewVirtualMachine(vmi, libvmi.WithRunStrategy(v1.RunStrategyAlways))
 
-			vm, err := virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm)
+			vm, err := virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm, k8smetav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
-			Eventually(ThisVM(vm), 360*time.Second, 1*time.Second).Should(beReady())
-			libwait.WaitForSuccessfulVMIStart(vmi)
+			Eventually(ThisVM(vm), 360*time.Second, 1*time.Second).Should(BeReady())
+			vmi = libwait.WaitForSuccessfulVMIStart(vmi)
 
 			By("Adding node selector")
 			vmNodeSelector := map[string]string{k8sv1.LabelOSStable: "not-existing-os"}
@@ -122,7 +114,7 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 
 			By("Ensuring the VMI has added node selector")
 			Eventually(func() bool {
-				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, k8smetav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				if vmi.Spec.NodeSelector == nil {
 					return false
@@ -136,7 +128,7 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 
 			By("Ensuring the VMI has the updated node selector")
 			Eventually(func() bool {
-				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, k8smetav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				if vmi.Spec.NodeSelector == nil {
 					return false
@@ -150,7 +142,7 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 
 			By("Ensuring the VMI has removed the node selector")
 			Eventually(func() bool {
-				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, k8smetav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				if vmi.Spec.NodeSelector == nil {
 					return false
@@ -159,19 +151,17 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 			}, 240*time.Second, time.Second).Should(BeTrue())
 
 		})
-		It("should successfully update node affinity", func() {
+		It("[test_id:11209]should successfully update node affinity", func() {
 
 			By("Creating a running VM")
-			vmi := libvmi.NewAlpineWithTestTooling(
-				libnet.WithMasqueradeNetworking()...,
-			)
+			vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking())
 			vmi.Namespace = testsuite.GetTestNamespace(vmi)
-			vm := libvmi.NewVirtualMachine(vmi, libvmi.WithRunning())
+			vm := libvmi.NewVirtualMachine(vmi, libvmi.WithRunStrategy(v1.RunStrategyAlways))
 
-			vm, err := virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm)
+			vm, err := virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm, k8smetav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
-			Eventually(ThisVM(vm), 360*time.Second, 1*time.Second).Should(beReady())
-			libwait.WaitForSuccessfulVMIStart(vmi)
+			Eventually(ThisVM(vm), 360*time.Second, 1*time.Second).Should(BeReady())
+			vmi = libwait.WaitForSuccessfulVMIStart(vmi)
 
 			By("Adding Affinity")
 			vmAffinity := generateNodeAffinity("fakeNode_1")
@@ -179,7 +169,7 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 
 			By("Ensuring the VMI has added affinity")
 			Eventually(func() bool {
-				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, k8smetav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				if vmi.Spec.Affinity == nil {
 					return false
@@ -193,7 +183,7 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 
 			By("Ensuring the VMI has the updated node affinity")
 			Eventually(func() bool {
-				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, k8smetav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				if vmi.Spec.Affinity == nil {
 					return false
@@ -207,7 +197,7 @@ var _ = Describe("[sig-compute]VM Affinity", decorators.SigCompute, decorators.S
 
 			By("Ensuring the VMI has removed the node affinity")
 			Eventually(func() bool {
-				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, k8smetav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				return vmi.Spec.Affinity == nil
 			}, 240*time.Second, time.Second).Should(BeTrue())

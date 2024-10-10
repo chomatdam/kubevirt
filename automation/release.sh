@@ -2,6 +2,8 @@
 
 set -exuo pipefail
 
+source automation/github-source-tarball-signature.sh
+
 function cleanup_gh_install() {
     [ -n "${gh_cli_dir}" ] && [ -d "${gh_cli_dir}" ] && rm -rf "${gh_cli_dir:?}/"
 }
@@ -28,7 +30,7 @@ function ensure_gh_cli_installed() {
     gh config set prompt disabled
 }
 
-export BUILD_ARCH=aarch64,x86_64
+export BUILD_ARCH=s390x,aarch64,x86_64
 export KUBEVIRT_RELEASE=true
 
 function build_release_artifacts() {
@@ -52,7 +54,7 @@ function update_github_release() {
     set +e
     if ! gh release view --repo "$GITHUB_REPOSITORY" "$DOCKER_TAG" ; then
         set -e
-        git show "$DOCKER_TAG" --format=format:%B > /tmp/tag_notes
+        git show "$DOCKER_TAG" --format=format:%n > /tmp/tag_notes
         gh release create --repo "$GITHUB_REPOSITORY" "$DOCKER_TAG" --prerelease --title="$DOCKER_TAG" --notes-file /tmp/tag_notes
     else
         set -e
@@ -110,6 +112,7 @@ function main() {
 
     build_release_artifacts
     update_github_release
+    update_github_source_tarball_signature
     upload_testing_manifests
     generate_stable_version_file
 

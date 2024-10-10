@@ -17,17 +17,19 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	libvmici "kubevirt.io/kubevirt/pkg/libvmi/cloudinit"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
 	"kubevirt.io/kubevirt/tests/exec"
 	"kubevirt.io/kubevirt/tests/framework/checks"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libpod"
 	"kubevirt.io/kubevirt/tests/libwait"
 	"kubevirt.io/kubevirt/tests/testsuite"
-	"kubevirt.io/kubevirt/tests/util"
 )
 
 const (
@@ -44,7 +46,7 @@ func newFedoraRealtime(realtimeMask string) *v1.VirtualMachineInstance {
 	return libvmi.New(
 		libvmi.WithRng(),
 		libvmi.WithContainerDisk("disk0", cd.ContainerDiskFor(cd.ContainerDiskFedoraRealtime)),
-		libvmi.WithCloudInitNoCloudEncodedUserData(tuneAdminRealtimeCloudInitData),
+		libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudEncodedUserData(tuneAdminRealtimeCloudInitData)),
 		libvmi.WithLimitMemory(memory),
 		libvmi.WithLimitCPU("2"),
 		libvmi.WithResourceMemory(memory),
@@ -61,7 +63,7 @@ func newFedoraRealtime(realtimeMask string) *v1.VirtualMachineInstance {
 func byStartingTheVMI(vmi *v1.VirtualMachineInstance, virtClient kubecli.KubevirtClient) *v1.VirtualMachineInstance {
 	By("Starting a VirtualMachineInstance")
 	var err error
-	vmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
+	vmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi, k8smetav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
 	return libwait.WaitForSuccessfulVMIStart(vmi)
 }
@@ -76,7 +78,6 @@ var _ = Describe("[sig-compute-realtime][Serial]Realtime", Serial, decorators.Si
 
 	Context("should start the realtime VM", func() {
 		BeforeEach(func() {
-			checks.SkipTestIfNoFeatureGate(virtconfig.NUMAFeatureGate)
 			checks.SkipTestIfNoFeatureGate(virtconfig.CPUManager)
 			checks.SkipTestIfNotRealtimeCapable()
 		})
@@ -85,15 +86,15 @@ var _ = Describe("[sig-compute-realtime][Serial]Realtime", Serial, decorators.Si
 			const noMask = ""
 			vmi := byStartingTheVMI(newFedoraRealtime(noMask), virtClient)
 			By("Validating VCPU scheduler placement information")
-			pod := tests.GetRunningPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
-			emulator, err := tests.GetRunningVMIEmulator(vmi)
+			pod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
 			Expect(err).ToNot(HaveOccurred())
-			emulator = filepath.Base(emulator)
+			domSpec, err := tests.GetRunningVMIDomainSpec(vmi)
+			Expect(err).ToNot(HaveOccurred())
+			emulator := filepath.Base(domSpec.Devices.Emulator)
 			psOutput, err := exec.ExecuteCommandOnPod(
-				virtClient,
 				pod,
 				"compute",
-				[]string{tests.BinBash, "-c", "ps -LC " + emulator + " -o policy,rtprio,psr|grep FF| awk '{print $2}'"},
+				[]string{"/bin/bash", "-c", "ps -LC " + emulator + " -o policy,rtprio,psr|grep FF| awk '{print $2}'"},
 			)
 			Expect(err).ToNot(HaveOccurred())
 			slice := strings.Split(strings.TrimSpace(psOutput), "\n")
@@ -103,10 +104,9 @@ var _ = Describe("[sig-compute-realtime][Serial]Realtime", Serial, decorators.Si
 			}
 			By("Validating that the memory lock limits are higher than the memory requested")
 			psOutput, err = exec.ExecuteCommandOnPod(
-				virtClient,
 				pod,
 				"compute",
-				[]string{tests.BinBash, "-c", "grep 'locked memory' /proc/$(ps -C " + emulator + " -o pid --noheader|xargs)/limits |tr -s ' '| awk '{print $4\" \"$5}'"},
+				[]string{"/bin/bash", "-c", "grep 'locked memory' /proc/$(ps -C " + emulator + " -o pid --noheader|xargs)/limits |tr -s ' '| awk '{print $4\" \"$5}'"},
 			)
 			Expect(err).ToNot(HaveOccurred())
 			limits := strings.Split(strings.TrimSpace(psOutput), " ")
@@ -120,7 +120,7 @@ var _ = Describe("[sig-compute-realtime][Serial]Realtime", Serial, decorators.Si
 			Expect(canConvert).To(BeTrue())
 			Expect(hardLimit).To(BeNumerically(">", requested))
 			By("checking if the guest is still running")
-			vmi, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+			vmi, err = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Get(context.Background(), vmi.Name, k8smetav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(vmi.Status.Phase).To(Equal(v1.Running))
 			Expect(console.LoginToFedora(vmi)).To(Succeed())
@@ -128,16 +128,16 @@ var _ = Describe("[sig-compute-realtime][Serial]Realtime", Serial, decorators.Si
 
 		It("when realtime mask is specified", func() {
 			vmi := byStartingTheVMI(newFedoraRealtime("0-1,^1"), virtClient)
-			pod := tests.GetRunningPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
-			By("Validating VCPU scheduler placement information")
-			emulator, err := tests.GetRunningVMIEmulator(vmi)
+			pod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
 			Expect(err).ToNot(HaveOccurred())
-			emulator = filepath.Base(emulator)
+			By("Validating VCPU scheduler placement information")
+			domSpec, err := tests.GetRunningVMIDomainSpec(vmi)
+			Expect(err).ToNot(HaveOccurred())
+			emulator := filepath.Base(domSpec.Devices.Emulator)
 			psOutput, err := exec.ExecuteCommandOnPod(
-				virtClient,
 				pod,
 				"compute",
-				[]string{tests.BinBash, "-c", "ps -LC " + emulator + " -o policy,rtprio,psr|grep FF| awk '{print $2}'"},
+				[]string{"/bin/bash", "-c", "ps -LC " + emulator + " -o policy,rtprio,psr|grep FF| awk '{print $2}'"},
 			)
 			Expect(err).ToNot(HaveOccurred())
 			slice := strings.Split(strings.TrimSpace(psOutput), "\n")
@@ -146,10 +146,9 @@ var _ = Describe("[sig-compute-realtime][Serial]Realtime", Serial, decorators.Si
 
 			By("Validating the VCPU mask matches the scheduler profile for all cores")
 			psOutput, err = exec.ExecuteCommandOnPod(
-				virtClient,
 				pod,
 				"compute",
-				[]string{tests.BinBash, "-c", "ps -TcC " + emulator + " |grep CPU |awk '{print $3\" \" $8}'"},
+				[]string{"/bin/bash", "-c", "ps -TcC " + emulator + " |grep CPU |awk '{print $3\" \" $8}'"},
 			)
 			Expect(err).ToNot(HaveOccurred())
 			slice = strings.Split(strings.TrimSpace(psOutput), "\n")
@@ -158,7 +157,7 @@ var _ = Describe("[sig-compute-realtime][Serial]Realtime", Serial, decorators.Si
 			Expect(slice[1]).To(Equal("TS 1/KVM"))
 
 			By("checking if the guest is still running")
-			vmi, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+			vmi, err = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Get(context.Background(), vmi.Name, k8smetav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(vmi.Status.Phase).To(Equal(v1.Running))
 			Expect(console.LoginToFedora(vmi)).To(Succeed())

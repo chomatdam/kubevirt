@@ -29,9 +29,9 @@ readonly BAZEL_CACHE="${BAZEL_CACHE:-http://bazel-cache.kubevirt-prow.svc.cluste
 
 # Skip if it's docs changes only
 # Only if we are in CI, and this is a non-batch change
-if [[ ${CI} == "true" && -n "$PULL_BASE_SHA" && -n "$PULL_PULL_SHA" ]]; then
-    SKIP_PATTERN="^(docs/)|(OWNERS|OWNERS_ALIASES|.*\.(md|txt))$"
-    CI_GIT_ALL_CHANGES=$(git diff --name-only $PULL_BASE_SHA $PULL_PULL_SHA)
+if [[ ${CI} == "true" && -n "$PULL_BASE_SHA" && -n "$PULL_PULL_SHA" && "$JOB_NAME" != *"rehearsal"* ]]; then
+    SKIP_PATTERN="^(docs/|\.github/)|(OWNERS|OWNERS_ALIASES|.*\.(md|txt))$"
+    CI_GIT_ALL_CHANGES=$(git diff --name-only ${PULL_BASE_SHA}...${PULL_PULL_SHA})
     CI_GIT_NO_DOCS_CHANGES=$(cat <<<$CI_GIT_ALL_CHANGES | grep -vE "$SKIP_PATTERN" || :)
     if [[ -z "$CI_GIT_NO_DOCS_CHANGES" ]]; then
         echo "Aborting as there were only none-code related changes detected."
@@ -84,6 +84,10 @@ elif [[ $TARGET =~ sig-compute-migrations ]]; then
   export KUBEVIRT_WITH_CNAO=true
   export KUBEVIRT_NUM_SECONDARY_NICS=1
   export KUBEVIRT_DEPLOY_NFS_CSI=true
+elif [[ $TARGET =~ sig-compute-serial ]]; then
+  export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-serial/}
+elif [[ $TARGET =~ sig-compute-parallel ]]; then
+  export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-parallel/}
 elif [[ $TARGET =~ sig-compute ]]; then
   export KUBEVIRT_PROVIDER=${TARGET/-sig-compute/}
 elif [[ $TARGET =~ sig-operator ]]; then
@@ -93,6 +97,8 @@ elif [[ $TARGET =~ sig-operator ]]; then
 elif [[ $TARGET =~ sig-monitoring ]]; then
     export KUBEVIRT_PROVIDER=${TARGET/-sig-monitoring/}
     export KUBEVIRT_DEPLOY_PROMETHEUS=true
+elif [[ $TARGET =~ wg-s390x ]]; then
+    export KUBEVIRT_PROVIDER=${TARGET/-wg-s390x}
 else
   export KUBEVIRT_PROVIDER=${TARGET}
 fi
@@ -119,7 +125,7 @@ else
 fi
 
 # Give the nodes enough memory to run tests in parallel, including tests which involve fedora
-export KUBEVIRT_MEMORY_SIZE=${KUBEVIRT_MEMORY_SIZE:-9216M}
+export KUBEVIRT_MEMORY_SIZE=${KUBEVIRT_MEMORY_SIZE:-11264M}
 
 export RHEL_NFS_DIR=${RHEL_NFS_DIR:-/var/lib/stdci/shared/kubevirt-images/rhel7}
 export RHEL_LOCK_PATH=${RHEL_LOCK_PATH:-/var/lib/stdci/shared/download_rhel_image.lock}
@@ -263,10 +269,11 @@ if [ "$CI" != "true" ]; then
   make cluster-down
 fi
 
-# Create .bazelrc to use remote cache
+# Create .bazelrc to use 4 jobs, remote cache and disable progress output
 cat >ci.bazelrc <<EOF
 build --jobs=4
 build --remote_download_toplevel
+build --noshow_progress
 EOF
 
 # Build and test images with a custom image name prefix
@@ -274,7 +281,7 @@ export IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT:-kv-}
 
 build_images
 
-trap '{ collect_debug_logs; echo "Dump kubevirt state:"; make dump; }' ERR
+trap '{ collect_debug_logs; }' ERR
 make cluster-up
 trap - ERR
 
@@ -293,7 +300,7 @@ set -e
 echo "Nodes are ready:"
 kubectl get nodes
 
-make cluster-sync
+ionice --class idle make cluster-sync
 
 # OpenShift is running important containers under default namespace
 namespaces=(kubevirt default)
@@ -417,12 +424,21 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
     fi
   elif [[ $TARGET =~ sig-storage ]]; then
     label_filter='(sig-storage)'
+  elif [[ $TARGET =~ wg-s390x ]]; then
+    label_filter='(wg-s390x)'
   elif [[ $TARGET =~ vgpu.* ]]; then
     label_filter='(VGPU)'
   elif [[ $TARGET =~ sig-compute-realtime ]]; then
     label_filter='(sig-compute-realtime)'
   elif [[ $TARGET =~ sig-compute-migrations ]]; then
     label_filter='(sig-compute-migrations && !(GPU,VGPU))'
+  elif [[ $TARGET =~ sig-compute-serial ]]; then
+    export KUBEVIRT_E2E_PARALLEL=false
+    ginko_params="${ginko_params} --focus=\\[Serial\\]"
+    label_filter='((sig-compute) && !(GPU,VGPU,sig-compute-migrations))'
+  elif [[ $TARGET =~ sig-compute-parallel ]]; then
+    ginko_params="${ginko_params} --skip=\\[Serial\\]"
+    label_filter='(sig-compute && !(GPU,VGPU,sig-compute-migrations))'
   elif [[ $TARGET =~ sig-compute ]]; then
     label_filter='(sig-compute && !(GPU,VGPU,sig-compute-migrations))'
   elif [[ $TARGET =~ sig-monitoring ]]; then
@@ -444,6 +460,16 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
   else
     label_filter='(!(Multus,SRIOV,Macvtap,GPU,VGPU,netCustomBindingPlugins))'
   fi
+
+  if [[ ! $TARGET =~ k8s-1\.3[0-9].* ]]; then
+    add_to_label_filter "(!kubernetes130)" "&&"
+  fi
+
+  # execute tests labelled as PERIODIC only on periodic test lanes (according to lane name)
+  if [[ ! $JOB_NAME =~ .*periodic.* ]]; then
+    add_to_label_filter "(!PERIODIC)" "&&"
+  fi
+
 fi
 
 # No lane currently supports loading a custom policy
@@ -458,10 +484,19 @@ if [[ $KUBEVIRT_NUM_NODES = "1" && $KUBEVIRT_INFRA_REPLICAS = "1" ]]; then
   add_to_label_filter '(!(SRIOV,GPU,Macvtap,VGPU,sig-compute-migrations,requires-two-schedulable-nodes))' '&&'
 fi
 
+# Single stack IPv6 cluster should skip tests that require dual stack cluster
+if [[ ${KUBEVIRT_SINGLE_STACK} == "true" ]]; then
+  add_to_label_filter '(!requires-dual-stack-cluster)' '&&'
+fi
+
 # If KUBEVIRT_QUARANTINE is not set, do not run quarantined tests. When it is
 # set the whole suite (quarantined and stable) will be run.
 if [ -z "$KUBEVIRT_QUARANTINE" ]; then
   add_to_label_filter '(!QUARANTINE)' '&&'
+fi
+
+if [ -z "$KUBEVIRT_HUGEPAGES_2M" ]; then
+  add_to_label_filter '(!requireHugepages2Mi)' '&&'
 fi
 
 # Prepare RHEL PV for Template testing

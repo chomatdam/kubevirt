@@ -19,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/ptr"
 
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
@@ -28,19 +27,22 @@ import (
 	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/pkg/instancetype"
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/testutils"
 
 	v1 "kubevirt.io/api/core/v1"
 	apiinstancetype "kubevirt.io/api/instancetype"
 	instancetypev1alpha1 "kubevirt.io/api/instancetype/v1alpha1"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
-	fakeclientset "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/fake"
-	instancetypeclientv1beta1 "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/typed/instancetype/v1beta1"
+	fakeclientset "kubevirt.io/client-go/kubevirt/fake"
+	instancetypeclientv1beta1 "kubevirt.io/client-go/kubevirt/typed/instancetype/v1beta1"
 )
 
-const resourceUID types.UID = "9160e5de-2540-476a-86d9-af0081aee68a"
-const resourceGeneration int64 = 1
-const nonExistingResourceName = "non-existing-resource"
+const (
+	resourceUID             types.UID = "9160e5de-2540-476a-86d9-af0081aee68a"
+	resourceGeneration      int64     = 1
+	nonExistingResourceName           = "non-existing-resource"
+)
 
 var _ = Describe("Instancetype and Preferences", func() {
 	var (
@@ -121,7 +123,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 	})
 
 	Context("Find and store instancetype", func() {
-
 		It("find returns nil when no instancetype is specified", func() {
 			vm.Spec.Instancetype = nil
 			spec, err := instancetypeMethods.FindInstancetypeSpec(vm)
@@ -198,6 +199,13 @@ var _ = Describe("Instancetype and Preferences", func() {
 				Expect(*instancetypeSpec).To(Equal(clusterInstancetype.Spec))
 			})
 
+			It("find returns expected instancetype spec with no kind provided", func() {
+				vm.Spec.Instancetype.Kind = ""
+				instancetypeSpec, err := instancetypeMethods.FindInstancetypeSpec(vm)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(*instancetypeSpec).To(Equal(clusterInstancetype.Spec))
+			})
+
 			It("uses client when instancetype not found within informer", func() {
 				err := clusterInstancetypeInformerStore.Delete(clusterInstancetype)
 				Expect(err).ToNot(HaveOccurred())
@@ -228,13 +236,12 @@ var _ = Describe("Instancetype and Preferences", func() {
 				expectedRevisionNamePatch, err := instancetype.GenerateRevisionNamePatch(clusterInstancetypeControllerRevision, nil)
 				Expect(err).ToNot(HaveOccurred())
 
-				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, &metav1.PatchOptions{})
+				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, metav1.PatchOptions{})
 
 				expectControllerRevisionCreation(clusterInstancetypeControllerRevision)
 
 				Expect(instancetypeMethods.StoreControllerRevisions(vm)).To(Succeed())
 				Expect(vm.Spec.Instancetype.RevisionName).To(Equal(clusterInstancetypeControllerRevision.Name))
-
 			})
 
 			It("store returns a nil revision when RevisionName already populated", func() {
@@ -271,7 +278,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				expectedRevisionNamePatch, err := instancetype.GenerateRevisionNamePatch(instancetypeControllerRevision, nil)
 				Expect(err).ToNot(HaveOccurred())
 
-				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, &metav1.PatchOptions{})
+				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, metav1.PatchOptions{})
 
 				Expect(instancetypeMethods.StoreControllerRevisions(vm)).To(Succeed())
 				Expect(vm.Spec.Instancetype.RevisionName).To(Equal(instancetypeControllerRevision.Name))
@@ -301,9 +308,9 @@ var _ = Describe("Instancetype and Preferences", func() {
 				clusterInstancetype.Spec.CPU = instancetypev1beta1.CPUInstancetype{
 					Guest: uint32(2),
 					// Set the following values to be compatible with objects converted from v1alpha1
-					Model:                 ptr.To(""),
-					DedicatedCPUPlacement: ptr.To(false),
-					IsolateEmulatorThread: ptr.To(false),
+					Model:                 pointer.P(""),
+					DedicatedCPUPlacement: pointer.P(false),
+					IsolateEmulatorThread: pointer.P(false),
 				}
 
 				specData, err := json.Marshal(clusterInstancetype.Spec)
@@ -418,7 +425,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				expectedRevisionNamePatch, err := instancetype.GenerateRevisionNamePatch(instancetypeControllerRevision, nil)
 				Expect(err).ToNot(HaveOccurred())
 
-				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, &metav1.PatchOptions{})
+				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, metav1.PatchOptions{})
 
 				expectControllerRevisionCreation(instancetypeControllerRevision)
 
@@ -460,11 +467,10 @@ var _ = Describe("Instancetype and Preferences", func() {
 				expectedRevisionNamePatch, err := instancetype.GenerateRevisionNamePatch(instancetypeControllerRevision, nil)
 				Expect(err).ToNot(HaveOccurred())
 
-				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, &metav1.PatchOptions{})
+				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, metav1.PatchOptions{})
 
 				Expect(instancetypeMethods.StoreControllerRevisions(vm)).To(Succeed())
 				Expect(vm.Spec.Instancetype.RevisionName).To(Equal(instancetypeControllerRevision.Name))
-
 			})
 
 			It("store ControllerRevision fails if a revision exists with unexpected data", func() {
@@ -491,9 +497,9 @@ var _ = Describe("Instancetype and Preferences", func() {
 				fakeInstancetype.Spec.CPU = instancetypev1beta1.CPUInstancetype{
 					Guest: uint32(2),
 					// Set the following values to be compatible with objects converted from v1alpha1
-					Model:                 ptr.To(""),
-					DedicatedCPUPlacement: ptr.To(false),
-					IsolateEmulatorThread: ptr.To(false),
+					Model:                 pointer.P(""),
+					DedicatedCPUPlacement: pointer.P(false),
+					IsolateEmulatorThread: pointer.P(false),
 				}
 
 				specData, err := json.Marshal(fakeInstancetype.Spec)
@@ -573,7 +579,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 	})
 
 	Context("Find and store preference", func() {
-
 		It("find returns nil when no preference is specified", func() {
 			vm.Spec.Preference = nil
 			preference, err := instancetypeMethods.FindPreferenceSpec(vm)
@@ -612,7 +617,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				fakeClusterPreferenceClient = fakeInstancetypeClients.VirtualMachineClusterPreferences()
 				virtClient.EXPECT().VirtualMachineClusterPreference().Return(fakeClusterPreferenceClient).AnyTimes()
 
-				preferredCPUTopology := instancetypev1beta1.PreferCores
+				preferredCPUTopology := instancetypev1beta1.Cores
 				clusterPreference = &instancetypev1beta1.VirtualMachineClusterPreference{
 					TypeMeta: metav1.TypeMeta{
 						Kind:       "VirtualMachineClusterPreference",
@@ -648,6 +653,13 @@ var _ = Describe("Instancetype and Preferences", func() {
 				Expect(*s).To(Equal(clusterPreference.Spec))
 			})
 
+			It("find returns expected preference spec with no kind provided", func() {
+				vm.Spec.Preference.Kind = ""
+				s, err := instancetypeMethods.FindPreferenceSpec(vm)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(*s).To(Equal(clusterPreference.Spec))
+			})
+
 			It("uses client when preference not found within informer", func() {
 				err := clusterPreferenceInformerStore.Delete(clusterPreference)
 				Expect(err).ToNot(HaveOccurred())
@@ -677,7 +689,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				expectedRevisionNamePatch, err := instancetype.GenerateRevisionNamePatch(nil, clusterPreferenceControllerRevision)
 				Expect(err).ToNot(HaveOccurred())
 
-				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, &metav1.PatchOptions{})
+				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, metav1.PatchOptions{})
 
 				expectControllerRevisionCreation(clusterPreferenceControllerRevision)
 
@@ -715,16 +727,15 @@ var _ = Describe("Instancetype and Preferences", func() {
 				expectedRevisionNamePatch, err := instancetype.GenerateRevisionNamePatch(nil, clusterPreferenceControllerRevision)
 				Expect(err).ToNot(HaveOccurred())
 
-				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, &metav1.PatchOptions{})
+				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, metav1.PatchOptions{})
 
 				Expect(instancetypeMethods.StoreControllerRevisions(vm)).To(Succeed())
 				Expect(vm.Spec.Preference.RevisionName).To(Equal(clusterPreferenceControllerRevision.Name))
-
 			})
 
 			It("store ControllerRevision fails if a revision exists with unexpected data", func() {
 				unexpectedPreference := clusterPreference.DeepCopy()
-				preferredCPUTopology := instancetypev1beta1.PreferThreads
+				preferredCPUTopology := instancetypev1beta1.Threads
 				unexpectedPreference.Spec.CPU.PreferredCPUTopology = &preferredCPUTopology
 
 				clusterPreferenceControllerRevision, err := instancetype.CreateControllerRevision(vm, unexpectedPreference)
@@ -745,7 +756,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				fakePreferenceClient = fakeInstancetypeClients.VirtualMachinePreferences(vm.Namespace)
 				virtClient.EXPECT().VirtualMachinePreference(gomock.Any()).Return(fakePreferenceClient).AnyTimes()
 
-				preferredCPUTopology := instancetypev1beta1.PreferCores
+				preferredCPUTopology := instancetypev1beta1.Cores
 				preference = &instancetypev1beta1.VirtualMachinePreference{
 					TypeMeta: metav1.TypeMeta{
 						Kind:       "VirtualMachinePreference",
@@ -812,13 +823,12 @@ var _ = Describe("Instancetype and Preferences", func() {
 				expectedRevisionNamePatch, err := instancetype.GenerateRevisionNamePatch(nil, preferenceControllerRevision)
 				Expect(err).ToNot(HaveOccurred())
 
-				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, &metav1.PatchOptions{})
+				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, metav1.PatchOptions{})
 
 				expectControllerRevisionCreation(preferenceControllerRevision)
 
 				Expect(instancetypeMethods.StoreControllerRevisions(vm)).To(Succeed())
 				Expect(vm.Spec.Preference.RevisionName).To(Equal(preferenceControllerRevision.Name))
-
 			})
 
 			It("store fails when VirtualMachinePreference doesn't exist", func() {
@@ -839,7 +849,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 
 				Expect(instancetypeMethods.StoreControllerRevisions(vm)).To(Succeed())
 				Expect(vm.Spec.Preference.RevisionName).To(Equal(preferenceControllerRevision.Name))
-
 			})
 
 			It("store ControllerRevision succeeds if a revision exists with expected data", func() {
@@ -852,16 +861,15 @@ var _ = Describe("Instancetype and Preferences", func() {
 				expectedRevisionNamePatch, err := instancetype.GenerateRevisionNamePatch(nil, preferenceControllerRevision)
 				Expect(err).ToNot(HaveOccurred())
 
-				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, &metav1.PatchOptions{})
+				vmInterface.EXPECT().Patch(context.Background(), vm.Name, types.JSONPatchType, expectedRevisionNamePatch, metav1.PatchOptions{})
 
 				Expect(instancetypeMethods.StoreControllerRevisions(vm)).To(Succeed())
 				Expect(vm.Spec.Preference.RevisionName).To(Equal(preferenceControllerRevision.Name))
-
 			})
 
 			It("store ControllerRevision fails if a revision exists with unexpected data", func() {
 				unexpectedPreference := preference.DeepCopy()
-				preferredCPUTopology := instancetypev1beta1.PreferThreads
+				preferredCPUTopology := instancetypev1beta1.Threads
 				unexpectedPreference.Spec.CPU.PreferredCPUTopology = &preferredCPUTopology
 
 				preferenceControllerRevision, err := instancetype.CreateControllerRevision(vm, unexpectedPreference)
@@ -915,7 +923,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 	})
 
 	Context("Apply", func() {
-
 		var (
 			instancetypeSpec *instancetypev1beta1.VirtualMachineInstancetypeSpec
 			preferenceSpec   *instancetypev1beta1.VirtualMachinePreferenceSpec
@@ -996,20 +1003,20 @@ var _ = Describe("Instancetype and Preferences", func() {
 		})
 
 		Context("instancetype.spec.CPU and preference.spec.CPU", func() {
-
 			BeforeEach(func() {
 				instancetypeSpec = &instancetypev1beta1.VirtualMachineInstancetypeSpec{
 					CPU: instancetypev1beta1.CPUInstancetype{
 						Guest:                 uint32(2),
-						Model:                 ptr.To("host-passthrough"),
-						DedicatedCPUPlacement: ptr.To(true),
-						IsolateEmulatorThread: ptr.To(true),
+						Model:                 pointer.P("host-passthrough"),
+						DedicatedCPUPlacement: pointer.P(true),
+						IsolateEmulatorThread: pointer.P(true),
 						NUMA: &v1.NUMA{
 							GuestMappingPassthrough: &v1.NUMAGuestMappingPassthrough{},
 						},
 						Realtime: &v1.Realtime{
 							Mask: "0-3,^1",
 						},
+						MaxSockets: pointer.P(uint32(6)),
 					},
 				}
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
@@ -1029,10 +1036,11 @@ var _ = Describe("Instancetype and Preferences", func() {
 				Expect(vmi.Spec.Domain.CPU.IsolateEmulatorThread).To(Equal(*instancetypeSpec.CPU.IsolateEmulatorThread))
 				Expect(*vmi.Spec.Domain.CPU.NUMA).To(Equal(*instancetypeSpec.CPU.NUMA))
 				Expect(*vmi.Spec.Domain.CPU.Realtime).To(Equal(*instancetypeSpec.CPU.Realtime))
+				Expect(vmi.Spec.Domain.CPU.MaxSockets).To(Equal(*instancetypeSpec.CPU.MaxSockets))
 			})
 
 			It("should default to Sockets, when instancetype is used with PreferAny", func() {
-				preferredCPUTopology := instancetypev1beta1.PreferAny
+				preferredCPUTopology := instancetypev1beta1.Any
 				preferenceSpec.CPU.PreferredCPUTopology = &preferredCPUTopology
 
 				conflicts := instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)
@@ -1043,7 +1051,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 			})
 
 			It("should apply in full with PreferCores selected", func() {
-				preferredCPUTopology := instancetypev1beta1.PreferCores
+				preferredCPUTopology := instancetypev1beta1.Cores
 				preferenceSpec.CPU.PreferredCPUTopology = &preferredCPUTopology
 
 				conflicts := instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)
@@ -1060,7 +1068,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 			})
 
 			It("should apply in full with PreferThreads selected", func() {
-				preferredCPUTopology := instancetypev1beta1.PreferThreads
+				preferredCPUTopology := instancetypev1beta1.Threads
 				preferenceSpec.CPU.PreferredCPUTopology = &preferredCPUTopology
 
 				conflicts := instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)
@@ -1077,7 +1085,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 			})
 
 			It("should apply in full with PreferSockets selected", func() {
-				preferredCPUTopology := instancetypev1beta1.PreferSockets
+				preferredCPUTopology := instancetypev1beta1.Sockets
 				preferenceSpec.CPU.PreferredCPUTopology = &preferredCPUTopology
 
 				conflicts := instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)
@@ -1093,23 +1101,318 @@ var _ = Describe("Instancetype and Preferences", func() {
 				Expect(*vmi.Spec.Domain.CPU.Realtime).To(Equal(*instancetypeSpec.CPU.Realtime))
 			})
 
-			DescribeTable("should spread between cores and sockets with PreferSpread selected", func(CPU, expectedCores, expectedSockets, spreadRatio int) {
-				preferredCPUTopology := instancetypev1beta1.PreferSpread
-				preferenceSpec.CPU.PreferredCPUTopology = &preferredCPUTopology
-				preferenceSpec.PreferSpreadSocketToCoreRatio = uint32(spreadRatio)
-				instancetypeSpec.CPU.Guest = uint32(CPU)
+			Context("with PreferSpread", func() {
+				DescribeTable("should spread", func(vCPUs uint32, preferenceSpec instancetypev1beta1.VirtualMachinePreferenceSpec, expectedCPU v1.CPU) {
+					instancetypeSpec.CPU.Guest = vCPUs
+					if preferenceSpec.CPU == nil {
+						preferenceSpec.CPU = &instancetypev1beta1.CPUPreferences{}
+					}
+					preferenceSpec.CPU.PreferredCPUTopology = pointer.P(instancetypev1beta1.Spread)
 
-				conflicts := instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)
-				Expect(conflicts).To(BeEmpty())
-
-				Expect(vmi.Spec.Domain.CPU.Cores).To(Equal(uint32(expectedCores)))
-				Expect(vmi.Spec.Domain.CPU.Sockets).To(Equal(uint32(expectedSockets)))
-				Expect(vmi.Spec.Domain.CPU.Threads).To(Equal(uint32(1)))
-			},
-				Entry("with default PreferSpreadSocketToCoreRatio", 4, 2, 2, 0),
-				Entry("with even PreferSpreadSocketToCoreRatio set", 8, 4, 2, 4),
-				Entry("with odd PreferSpreadSocketToCoreRatio set", 9, 3, 3, 3),
-			)
+					Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, &preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
+					Expect(vmi.Spec.Domain.CPU.Sockets).To(Equal(expectedCPU.Sockets))
+					Expect(vmi.Spec.Domain.CPU.Cores).To(Equal(expectedCPU.Cores))
+					Expect(vmi.Spec.Domain.CPU.Threads).To(Equal(expectedCPU.Threads))
+				},
+					Entry("by default to SocketsCores with a default topology for 1 vCPU",
+						uint32(1),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{},
+						v1.CPU{Sockets: 1, Cores: 1, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 2 vCPUs and a default ratio of 1:2:1",
+						uint32(2),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{},
+						v1.CPU{Sockets: 1, Cores: 2, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 4 vCPUs and a default ratio of 1:2:1",
+						uint32(4),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{},
+						v1.CPU{Sockets: 2, Cores: 2, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 6 vCPUs and a default ratio of 1:2:1",
+						uint32(6),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{},
+						v1.CPU{Sockets: 3, Cores: 2, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 8 vCPUs and a default ratio of 1:2:1",
+						uint32(8),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{},
+						v1.CPU{Sockets: 4, Cores: 2, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 3 vCPUs and a ratio of 1:3:1",
+						uint32(3),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Ratio: pointer.P(uint32(3)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 1, Cores: 3, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 6 vCPUs and a ratio of 1:3:1",
+						uint32(6),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Ratio: pointer.P(uint32(3)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 2, Cores: 3, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 9 vCPUs and a ratio of 1:3:1",
+						uint32(9),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Ratio: pointer.P(uint32(3)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 3, Cores: 3, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 12 vCPUs and a ratio of 1:3:1",
+						uint32(12),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Ratio: pointer.P(uint32(3)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 4, Cores: 3, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 4 vCPUs and a ratio of 1:4:1",
+						uint32(4),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Ratio: pointer.P(uint32(4)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 1, Cores: 4, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 8 vCPUs and a ratio of 1:4:1",
+						uint32(8),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Ratio: pointer.P(uint32(4)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 2, Cores: 4, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 12 vCPUs and a ratio of 1:4:1",
+						uint32(12),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Ratio: pointer.P(uint32(4)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 3, Cores: 4, Threads: 1},
+					),
+					Entry("by default to SocketsCores with 16 vCPUs and a ratio of 1:4:1",
+						uint32(16),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Ratio: pointer.P(uint32(4)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 4, Cores: 4, Threads: 1},
+					),
+					Entry("to SocketsCoresThreads with 4 vCPUs and a default ratio of 1:2:2",
+						uint32(4),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+								},
+							},
+						},
+						v1.CPU{Sockets: 1, Cores: 2, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 8 vCPUs and a default ratio of 1:2:2",
+						uint32(8),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+								},
+							},
+						},
+						v1.CPU{Sockets: 2, Cores: 2, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 12 vCPUs and a default ratio of 1:2:2",
+						uint32(12),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+								},
+							},
+						},
+						v1.CPU{Sockets: 3, Cores: 2, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 16 vCPUs and a default ratio of 1:2:2",
+						uint32(16),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+								},
+							},
+						},
+						v1.CPU{Sockets: 4, Cores: 2, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 6 vCPUs and a ratio of 1:3:2",
+						uint32(6),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+									Ratio:  pointer.P(uint32(3)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 1, Cores: 3, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 12 vCPUs and a ratio of 1:3:2",
+						uint32(12),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+									Ratio:  pointer.P(uint32(3)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 2, Cores: 3, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 18 vCPUs and a ratio of 1:3:2",
+						uint32(18),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+									Ratio:  pointer.P(uint32(3)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 3, Cores: 3, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 24 vCPUs and a ratio of 1:3:2",
+						uint32(24),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+									Ratio:  pointer.P(uint32(3)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 4, Cores: 3, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 8 vCPUs and a ratio of 1:4:2",
+						uint32(8),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+									Ratio:  pointer.P(uint32(4)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 1, Cores: 4, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 16 vCPUs and a ratio of 1:4:2",
+						uint32(16),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+									Ratio:  pointer.P(uint32(4)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 2, Cores: 4, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 24 vCPUs and a ratio of 1:4:2",
+						uint32(24),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+									Ratio:  pointer.P(uint32(4)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 3, Cores: 4, Threads: 2},
+					),
+					Entry("to SocketsCoresThreads with 36 vCPUs and a ratio of 1:4:2",
+						uint32(36),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+									Ratio:  pointer.P(uint32(4)),
+								},
+							},
+						},
+						v1.CPU{Sockets: 4, Cores: 4, Threads: 2},
+					),
+					Entry("to CoresThreads with 2 vCPUs and a default ratio of 1:2",
+						uint32(2),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossCoresThreads),
+								},
+							},
+						},
+						v1.CPU{Sockets: 1, Cores: 1, Threads: 2},
+					),
+					Entry("to CoresThreads with 4 vCPUs and a default ratio of 1:2",
+						uint32(4),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossCoresThreads),
+								},
+							},
+						},
+						v1.CPU{Sockets: 1, Cores: 2, Threads: 2},
+					),
+					Entry("to CoresThreads with 6 vCPUs and a default ratio of 1:2",
+						uint32(6),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossCoresThreads),
+								},
+							},
+						},
+						v1.CPU{Sockets: 1, Cores: 3, Threads: 2},
+					),
+					Entry("to CoresThreads with 8 vCPUs and a default ratio of 1:2",
+						uint32(8),
+						instancetypev1beta1.VirtualMachinePreferenceSpec{
+							CPU: &instancetypev1beta1.CPUPreferences{
+								SpreadOptions: &instancetypev1beta1.SpreadOptions{
+									Across: pointer.P(instancetypev1beta1.SpreadAcrossCoresThreads),
+								},
+							},
+						},
+						v1.CPU{Sockets: 1, Cores: 4, Threads: 2},
+					),
+				)
+			})
 
 			It("should return a conflict if vmi.Spec.Domain.CPU already defined", func() {
 				instancetypeSpec = &instancetypev1beta1.VirtualMachineInstancetypeSpec{
@@ -1207,12 +1510,14 @@ var _ = Describe("Instancetype and Preferences", func() {
 
 		Context("instancetype.Spec.Memory", func() {
 			BeforeEach(func() {
+				maxGuest := resource.MustParse("2G")
 				instancetypeSpec = &instancetypev1beta1.VirtualMachineInstancetypeSpec{
 					Memory: instancetypev1beta1.MemoryInstancetype{
 						Guest: resource.MustParse("512M"),
 						Hugepages: &v1.Hugepages{
 							PageSize: "1Gi",
 						},
+						MaxGuest: &maxGuest,
 					},
 				}
 			})
@@ -1223,6 +1528,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 
 				Expect(*vmi.Spec.Domain.Memory.Guest).To(Equal(instancetypeSpec.Memory.Guest))
 				Expect(*vmi.Spec.Domain.Memory.Hugepages).To(Equal(*instancetypeSpec.Memory.Hugepages))
+				Expect(vmi.Spec.Domain.Memory.MaxGuest.Equal(*instancetypeSpec.Memory.MaxGuest)).To(BeTrue())
 			})
 
 			It("should apply memory overcommit correctly to VMI", func() {
@@ -1286,7 +1592,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 			})
 		})
 		Context("instancetype.Spec.ioThreadsPolicy", func() {
-
 			var instancetypePolicy v1.IOThreadsPolicy
 
 			BeforeEach(func() {
@@ -1313,7 +1618,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 		})
 
 		Context("instancetype.Spec.LaunchSecurity", func() {
-
 			BeforeEach(func() {
 				instancetypeSpec = &instancetypev1beta1.VirtualMachineInstancetypeSpec{
 					LaunchSecurity: &v1.LaunchSecurity{
@@ -1341,7 +1645,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 		})
 
 		Context("instancetype.Spec.GPUs", func() {
-
 			BeforeEach(func() {
 				instancetypeSpec = &instancetypev1beta1.VirtualMachineInstancetypeSpec{
 					GPUs: []v1.GPU{
@@ -1375,7 +1678,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 		})
 
 		Context("instancetype.Spec.HostDevices", func() {
-
 			BeforeEach(func() {
 				instancetypeSpec = &instancetypev1beta1.VirtualMachineInstancetypeSpec{
 					HostDevices: []v1.HostDevice{
@@ -1409,7 +1711,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 		})
 
 		Context("Instancetype.Spec.Annotations", func() {
-
 			var multipleAnnotations map[string]string
 
 			BeforeEach(func() {
@@ -1453,7 +1754,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 		})
 
 		Context("Preference.Spec.Annotations", func() {
-
 			var multipleAnnotations map[string]string
 
 			BeforeEach(func() {
@@ -1493,7 +1793,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 
 		// TODO - break this up into smaller more targeted tests
 		Context("Preference.Devices", func() {
-
 			var userDefinedBlockSize *v1.BlockSize
 
 			BeforeEach(func() {
@@ -1503,14 +1802,13 @@ var _ = Describe("Instancetype and Preferences", func() {
 						Physical: 512,
 					},
 				}
-				vmi.Spec.Domain.Devices.AutoattachGraphicsDevice = ptr.To(false)
-				vmi.Spec.Domain.Devices.AutoattachMemBalloon = ptr.To(false)
+				vmi.Spec.Domain.Devices.AutoattachGraphicsDevice = pointer.P(false)
+				vmi.Spec.Domain.Devices.AutoattachMemBalloon = pointer.P(false)
 				vmi.Spec.Domain.Devices.Disks = []v1.Disk{
 					{
-						Cache:             v1.CacheWriteBack,
-						IO:                v1.IONative,
-						DedicatedIOThread: ptr.To(false),
-						BlockSize:         userDefinedBlockSize,
+						Cache:     v1.CacheWriteBack,
+						IO:        v1.IONative,
+						BlockSize: userDefinedBlockSize,
 						DiskDevice: v1.DiskDevice{
 							Disk: &v1.DiskTarget{
 								Bus: v1.DiskBusSCSI,
@@ -1567,16 +1865,16 @@ var _ = Describe("Instancetype and Preferences", func() {
 
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Devices: &instancetypev1beta1.DevicePreferences{
-						PreferredAutoattachGraphicsDevice:   ptr.To(true),
-						PreferredAutoattachMemBalloon:       ptr.To(true),
-						PreferredAutoattachPodInterface:     ptr.To(true),
-						PreferredAutoattachSerialConsole:    ptr.To(true),
-						PreferredAutoattachInputDevice:      ptr.To(true),
-						PreferredDiskDedicatedIoThread:      ptr.To(true),
-						PreferredDisableHotplug:             ptr.To(true),
-						PreferredUseVirtioTransitional:      ptr.To(true),
-						PreferredNetworkInterfaceMultiQueue: ptr.To(true),
-						PreferredBlockMultiQueue:            ptr.To(true),
+						PreferredAutoattachGraphicsDevice:   pointer.P(true),
+						PreferredAutoattachMemBalloon:       pointer.P(true),
+						PreferredAutoattachPodInterface:     pointer.P(true),
+						PreferredAutoattachSerialConsole:    pointer.P(true),
+						PreferredAutoattachInputDevice:      pointer.P(true),
+						PreferredDiskDedicatedIoThread:      pointer.P(true),
+						PreferredDisableHotplug:             pointer.P(true),
+						PreferredUseVirtioTransitional:      pointer.P(true),
+						PreferredNetworkInterfaceMultiQueue: pointer.P(true),
+						PreferredBlockMultiQueue:            pointer.P(true),
 						PreferredDiskBlockSize: &v1.BlockSize{
 							Custom: &v1.CustomBlockSize{
 								Logical:  4096,
@@ -1635,7 +1933,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 				Expect(*vmi.Spec.Domain.Devices.AutoattachInputDevice).To(BeTrue())
 				Expect(vmi.Spec.Domain.Devices.Disks[0].Cache).To(Equal(v1.CacheWriteBack))
 				Expect(vmi.Spec.Domain.Devices.Disks[0].IO).To(Equal(v1.IONative))
-				Expect(*vmi.Spec.Domain.Devices.Disks[0].DedicatedIOThread).To(BeFalse())
 				Expect(*vmi.Spec.Domain.Devices.Disks[0].BlockSize).To(Equal(*userDefinedBlockSize))
 				Expect(vmi.Spec.Domain.Devices.Disks[0].DiskDevice.Disk.Bus).To(Equal(v1.DiskBusSCSI))
 				Expect(vmi.Spec.Domain.Devices.Disks[2].DiskDevice.CDRom.Bus).To(Equal(v1.DiskBusSATA))
@@ -1651,7 +1948,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 				Expect(*vmi.Spec.Domain.Devices.UseVirtioTransitional).To(Equal(*preferenceSpec.Devices.PreferredUseVirtioTransitional))
 				Expect(vmi.Spec.Domain.Devices.Disks[1].Cache).To(Equal(preferenceSpec.Devices.PreferredDiskCache))
 				Expect(vmi.Spec.Domain.Devices.Disks[1].IO).To(Equal(preferenceSpec.Devices.PreferredDiskIO))
-				Expect(*vmi.Spec.Domain.Devices.Disks[1].DedicatedIOThread).To(Equal(*preferenceSpec.Devices.PreferredDiskDedicatedIoThread))
 				Expect(*vmi.Spec.Domain.Devices.Disks[1].BlockSize).To(Equal(*preferenceSpec.Devices.PreferredDiskBlockSize))
 				Expect(vmi.Spec.Domain.Devices.Disks[1].DiskDevice.Disk.Bus).To(Equal(preferenceSpec.Devices.PreferredDiskBus))
 				Expect(vmi.Spec.Domain.Devices.Disks[3].DiskDevice.CDRom.Bus).To(Equal(preferenceSpec.Devices.PreferredCdromBus))
@@ -1684,36 +1980,72 @@ var _ = Describe("Instancetype and Preferences", func() {
 
 				Expect(vmi.Spec.Domain.Devices.Disks[1].DiskDevice.Disk.Bus).To(Equal(diskTypeForTest))
 			})
+
+			Context("PreferredDiskDedicatedIoThread", func() {
+				DescribeTable("should be ignored when", func(preferenceSpec *instancetypev1beta1.VirtualMachinePreferenceSpec) {
+					Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
+					for _, disk := range vmi.Spec.Domain.Devices.Disks {
+						if disk.DiskDevice.Disk != nil {
+							Expect(disk.DedicatedIOThread).To(BeNil())
+						}
+					}
+				},
+					Entry("unset", &instancetypev1beta1.VirtualMachinePreferenceSpec{
+						Devices: &instancetypev1beta1.DevicePreferences{},
+					}),
+					Entry("false", &instancetypev1beta1.VirtualMachinePreferenceSpec{
+						Devices: &instancetypev1beta1.DevicePreferences{
+							PreferredDiskDedicatedIoThread: pointer.P(false),
+						},
+					}),
+				)
+				It("should only apply to virtio disk devices", func() {
+					preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
+						Devices: &instancetypev1beta1.DevicePreferences{
+							PreferredDiskDedicatedIoThread: pointer.P(true),
+						},
+					}
+					Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
+					for _, disk := range vmi.Spec.Domain.Devices.Disks {
+						if disk.DiskDevice.Disk != nil {
+							if disk.DiskDevice.Disk.Bus == v1.DiskBusVirtio {
+								Expect(disk.DedicatedIOThread).To(HaveValue(BeTrue()))
+							} else {
+								Expect(disk.DedicatedIOThread).To(BeNil())
+							}
+						}
+					}
+				})
+			})
 		})
 
 		Context("Preference.Features", func() {
-
 			BeforeEach(func() {
 				spinLockRetries := uint32(32)
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Features: &instancetypev1beta1.FeaturePreferences{
 						PreferredAcpi: &v1.FeatureState{},
 						PreferredApic: &v1.FeatureAPIC{
-							Enabled:        ptr.To(true),
+							Enabled:        pointer.P(true),
 							EndOfInterrupt: false,
 						},
 						PreferredHyperv: &v1.FeatureHyperv{
 							Relaxed: &v1.FeatureState{},
 							VAPIC:   &v1.FeatureState{},
 							Spinlocks: &v1.FeatureSpinlocks{
-								Enabled: ptr.To(true),
+								Enabled: pointer.P(true),
 								Retries: &spinLockRetries,
 							},
 							VPIndex: &v1.FeatureState{},
 							Runtime: &v1.FeatureState{},
 							SyNIC:   &v1.FeatureState{},
 							SyNICTimer: &v1.SyNICTimer{
-								Enabled: ptr.To(true),
+								Enabled: pointer.P(true),
 								Direct:  &v1.FeatureState{},
 							},
 							Reset: &v1.FeatureState{},
 							VendorID: &v1.FeatureVendorID{
-								Enabled:  ptr.To(true),
+								Enabled:  pointer.P(true),
 								VendorID: "1234",
 							},
 							Frequencies:     &v1.FeatureState{},
@@ -1747,7 +2079,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				vmi.Spec.Domain.Features = &v1.Features{
 					Hyperv: &v1.FeatureHyperv{
 						EVMCS: &v1.FeatureState{
-							Enabled: ptr.To(false),
+							Enabled: pointer.P(false),
 						},
 					},
 				}
@@ -1760,14 +2092,13 @@ var _ = Describe("Instancetype and Preferences", func() {
 		})
 
 		Context("Preference.Firmware", func() {
-
 			It("should apply BIOS preferences full to VMI", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Firmware: &instancetypev1beta1.FirmwarePreferences{
-						PreferredUseBios:       ptr.To(true),
-						PreferredUseBiosSerial: ptr.To(true),
-						PreferredUseEfi:        ptr.To(false),
-						PreferredUseSecureBoot: ptr.To(false),
+						PreferredUseBios:       pointer.P(true),
+						PreferredUseBiosSerial: pointer.P(true),
+						PreferredUseEfi:        pointer.P(false),
+						PreferredUseSecureBoot: pointer.P(false),
 					},
 				}
 
@@ -1780,10 +2111,10 @@ var _ = Describe("Instancetype and Preferences", func() {
 			It("should apply SecureBoot preferences full to VMI", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Firmware: &instancetypev1beta1.FirmwarePreferences{
-						PreferredUseBios:       ptr.To(false),
-						PreferredUseBiosSerial: ptr.To(false),
-						PreferredUseEfi:        ptr.To(true),
-						PreferredUseSecureBoot: ptr.To(true),
+						PreferredUseBios:       pointer.P(false),
+						PreferredUseBiosSerial: pointer.P(false),
+						PreferredUseEfi:        pointer.P(true),
+						PreferredUseSecureBoot: pointer.P(true),
 					},
 				}
 
@@ -1796,14 +2127,14 @@ var _ = Describe("Instancetype and Preferences", func() {
 			It("should not overwrite user defined Bootloader.BIOS with PreferredUseEfi - bug #10313", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Firmware: &instancetypev1beta1.FirmwarePreferences{
-						PreferredUseEfi:        ptr.To(true),
-						PreferredUseSecureBoot: ptr.To(true),
+						PreferredUseEfi:        pointer.P(true),
+						PreferredUseSecureBoot: pointer.P(true),
 					},
 				}
 				vmi.Spec.Domain.Firmware = &v1.Firmware{
 					Bootloader: &v1.Bootloader{
 						BIOS: &v1.BIOS{
-							UseSerial: ptr.To(false),
+							UseSerial: pointer.P(false),
 						},
 					},
 				}
@@ -1815,14 +2146,14 @@ var _ = Describe("Instancetype and Preferences", func() {
 			It("should not overwrite user defined value with PreferredUseBiosSerial - bug #10313", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Firmware: &instancetypev1beta1.FirmwarePreferences{
-						PreferredUseBios:       ptr.To(true),
-						PreferredUseBiosSerial: ptr.To(true),
+						PreferredUseBios:       pointer.P(true),
+						PreferredUseBiosSerial: pointer.P(true),
 					},
 				}
 				vmi.Spec.Domain.Firmware = &v1.Firmware{
 					Bootloader: &v1.Bootloader{
 						BIOS: &v1.BIOS{
-							UseSerial: ptr.To(false),
+							UseSerial: pointer.P(false),
 						},
 					},
 				}
@@ -1833,14 +2164,14 @@ var _ = Describe("Instancetype and Preferences", func() {
 			It("should not overwrite user defined Bootloader.EFI with PreferredUseBios - bug #10313", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Firmware: &instancetypev1beta1.FirmwarePreferences{
-						PreferredUseBios:       ptr.To(true),
-						PreferredUseBiosSerial: ptr.To(true),
+						PreferredUseBios:       pointer.P(true),
+						PreferredUseBiosSerial: pointer.P(true),
 					},
 				}
 				vmi.Spec.Domain.Firmware = &v1.Firmware{
 					Bootloader: &v1.Bootloader{
 						EFI: &v1.EFI{
-							SecureBoot: ptr.To(false),
+							SecureBoot: pointer.P(false),
 						},
 					},
 				}
@@ -1852,24 +2183,93 @@ var _ = Describe("Instancetype and Preferences", func() {
 			It("should not overwrite user defined value with PreferredUseSecureBoot - bug #10313", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Firmware: &instancetypev1beta1.FirmwarePreferences{
-						PreferredUseEfi:        ptr.To(true),
-						PreferredUseSecureBoot: ptr.To(true),
+						PreferredUseEfi:        pointer.P(true),
+						PreferredUseSecureBoot: pointer.P(true),
 					},
 				}
 				vmi.Spec.Domain.Firmware = &v1.Firmware{
 					Bootloader: &v1.Bootloader{
 						EFI: &v1.EFI{
-							SecureBoot: ptr.To(false),
+							SecureBoot: pointer.P(false),
 						},
 					},
 				}
 				Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
 				Expect(*vmi.Spec.Domain.Firmware.Bootloader.EFI.SecureBoot).To(BeFalse())
 			})
+
+			It("should apply PreferredEfi", func() {
+				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
+					Firmware: &instancetypev1beta1.FirmwarePreferences{
+						PreferredEfi: &v1.EFI{
+							Persistent: pointer.P(true),
+							SecureBoot: pointer.P(true),
+						},
+					},
+				}
+				Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
+				Expect(*vmi.Spec.Domain.Firmware.Bootloader.EFI).ToNot(BeNil())
+				Expect(*vmi.Spec.Domain.Firmware.Bootloader.EFI.Persistent).To(BeTrue())
+				Expect(*vmi.Spec.Domain.Firmware.Bootloader.EFI.SecureBoot).To(BeTrue())
+			})
+
+			It("should ignore PreferredUseEfi and PreferredUseSecureBoot when using PreferredEfi", func() {
+				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
+					Firmware: &instancetypev1beta1.FirmwarePreferences{
+						PreferredEfi: &v1.EFI{
+							Persistent: pointer.P(true),
+						},
+						PreferredUseEfi:        pointer.P(false),
+						PreferredUseSecureBoot: pointer.P(true),
+					},
+				}
+				Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
+				Expect(*vmi.Spec.Domain.Firmware.Bootloader.EFI).ToNot(BeNil())
+				Expect(*vmi.Spec.Domain.Firmware.Bootloader.EFI.Persistent).To(BeTrue())
+				Expect(vmi.Spec.Domain.Firmware.Bootloader.EFI.SecureBoot).To(BeNil())
+			})
+
+			It("should not overwrite EFI when using PreferredEfi - bug #12985", func() {
+				vmi.Spec.Domain.Firmware = &v1.Firmware{
+					Bootloader: &v1.Bootloader{
+						EFI: &v1.EFI{
+							SecureBoot: pointer.P(false),
+						},
+					},
+				}
+				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
+					Firmware: &instancetypev1beta1.FirmwarePreferences{
+						PreferredEfi: &v1.EFI{
+							SecureBoot: pointer.P(true),
+							Persistent: pointer.P(true),
+						},
+					},
+				}
+				Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
+				Expect(vmi.Spec.Domain.Firmware.Bootloader.EFI).ToNot(BeNil())
+				Expect(vmi.Spec.Domain.Firmware.Bootloader.EFI.SecureBoot).ToNot(BeNil())
+				Expect(*vmi.Spec.Domain.Firmware.Bootloader.EFI.SecureBoot).To(BeFalse())
+				Expect(vmi.Spec.Domain.Firmware.Bootloader.EFI.Persistent).To(BeNil())
+			})
+
+			It("should not apply PreferredEfi when VM already using BIOS - bug #12985", func() {
+				vmi.Spec.Domain.Firmware = &v1.Firmware{
+					Bootloader: &v1.Bootloader{
+						BIOS: &v1.BIOS{},
+					},
+				}
+				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
+					Firmware: &instancetypev1beta1.FirmwarePreferences{
+						PreferredEfi: &v1.EFI{},
+					},
+				}
+				Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
+				Expect(vmi.Spec.Domain.Firmware.Bootloader.BIOS).ToNot(BeNil())
+				Expect(vmi.Spec.Domain.Firmware.Bootloader.EFI).To(BeNil())
+			})
 		})
 
 		Context("Preference.Machine", func() {
-
 			It("should apply to VMI", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Machine: &instancetypev1beta1.MachinePreferences{
@@ -1884,13 +2284,12 @@ var _ = Describe("Instancetype and Preferences", func() {
 			})
 		})
 		Context("Preference.Clock", func() {
-
 			It("should apply to VMI", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 					Clock: &instancetypev1beta1.ClockPreferences{
 						PreferredClockOffset: &v1.ClockOffset{
 							UTC: &v1.ClockOffsetUTC{
-								OffsetSeconds: ptr.To(30),
+								OffsetSeconds: pointer.P(30),
 							},
 						},
 						PreferredTimer: &v1.Timer{
@@ -1910,7 +2309,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 		Context("Preference.PreferredSubdomain", func() {
 			It("should apply to VMI", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
-					PreferredSubdomain: ptr.To("kubevirt.io"),
+					PreferredSubdomain: pointer.P("kubevirt.io"),
 				}
 				Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
 				Expect(vmi.Spec.Subdomain).To(Equal(*preferenceSpec.PreferredSubdomain))
@@ -1920,7 +2319,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				const userDefinedValue = "foo.com"
 				vmi.Spec.Subdomain = userDefinedValue
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
-					PreferredSubdomain: ptr.To("kubevirt.io"),
+					PreferredSubdomain: pointer.P("kubevirt.io"),
 				}
 				Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
 				Expect(vmi.Spec.Subdomain).To(Equal(userDefinedValue))
@@ -1930,7 +2329,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 		Context("Preference.PreferredTerminationGracePeriodSeconds", func() {
 			It("should apply to VMI", func() {
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
-					PreferredTerminationGracePeriodSeconds: ptr.To(int64(180)),
+					PreferredTerminationGracePeriodSeconds: pointer.P(int64(180)),
 				}
 				Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
 				Expect(*vmi.Spec.TerminationGracePeriodSeconds).To(Equal(*preferenceSpec.PreferredTerminationGracePeriodSeconds))
@@ -1938,9 +2337,9 @@ var _ = Describe("Instancetype and Preferences", func() {
 
 			It("should not overwrite user defined value", func() {
 				const userDefinedValue = int64(100)
-				vmi.Spec.TerminationGracePeriodSeconds = ptr.To(userDefinedValue)
+				vmi.Spec.TerminationGracePeriodSeconds = pointer.P(userDefinedValue)
 				preferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
-					PreferredTerminationGracePeriodSeconds: ptr.To(int64(180)),
+					PreferredTerminationGracePeriodSeconds: pointer.P(int64(180)),
 				}
 				Expect(instancetypeMethods.ApplyToVmi(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(BeEmpty())
 				Expect(*vmi.Spec.TerminationGracePeriodSeconds).To(Equal(userDefinedValue))
@@ -1949,14 +2348,6 @@ var _ = Describe("Instancetype and Preferences", func() {
 	})
 
 	Context("preference requirements check", func() {
-		var (
-			preferCores   = instancetypev1beta1.PreferCores
-			preferSockets = instancetypev1beta1.PreferSockets
-			preferThreads = instancetypev1beta1.PreferThreads
-			preferSpread  = instancetypev1beta1.PreferSpread
-			preferAny     = instancetypev1beta1.PreferAny
-		)
-
 		DescribeTable("should pass when sufficient resources are provided", func(instancetypeSpec *instancetypev1beta1.VirtualMachineInstancetypeSpec, preferenceSpec *instancetypev1beta1.VirtualMachinePreferenceSpec, vmiSpec *v1.VirtualMachineInstanceSpec) {
 			path, err := instancetypeMethods.CheckPreferenceRequirements(instancetypeSpec, preferenceSpec, vmiSpec)
 			Expect(path).To(BeNil())
@@ -1996,7 +2387,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferSockets,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Sockets),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2016,7 +2407,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferCores,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Cores),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2036,7 +2427,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferThreads,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Threads),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2052,11 +2443,11 @@ var _ = Describe("Instancetype and Preferences", func() {
 					},
 				},
 			),
-			Entry("by a VM for vCPUs using PreferSpread",
+			Entry("by a VM for vCPUs using PreferSpread by default across SocketsCores",
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferSpread,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Spread),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2073,11 +2464,60 @@ var _ = Describe("Instancetype and Preferences", func() {
 					},
 				},
 			),
+			Entry("by a VM for vCPUs using PreferSpread across CoresThreads",
+				nil,
+				&instancetypev1beta1.VirtualMachinePreferenceSpec{
+					CPU: &instancetypev1beta1.CPUPreferences{
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Spread),
+						SpreadOptions: &instancetypev1beta1.SpreadOptions{
+							Across: pointer.P(instancetypev1beta1.SpreadAcrossCoresThreads),
+						},
+					},
+					Requirements: &instancetypev1beta1.PreferenceRequirements{
+						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
+							Guest: uint32(6),
+						},
+					},
+				},
+				&v1.VirtualMachineInstanceSpec{
+					Domain: v1.DomainSpec{
+						CPU: &v1.CPU{
+							Threads: uint32(2),
+							Cores:   uint32(3),
+						},
+					},
+				},
+			),
+			Entry("by a VM for vCPUs using PreferSpread across SocketsCoresThreads",
+				nil,
+				&instancetypev1beta1.VirtualMachinePreferenceSpec{
+					CPU: &instancetypev1beta1.CPUPreferences{
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Spread),
+						SpreadOptions: &instancetypev1beta1.SpreadOptions{
+							Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+						},
+					},
+					Requirements: &instancetypev1beta1.PreferenceRequirements{
+						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
+							Guest: uint32(8),
+						},
+					},
+				},
+				&v1.VirtualMachineInstanceSpec{
+					Domain: v1.DomainSpec{
+						CPU: &v1.CPU{
+							Threads: uint32(2),
+							Cores:   uint32(2),
+							Sockets: uint32(2),
+						},
+					},
+				},
+			),
 			Entry("by a VM for vCPUs using PreferAny",
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferAny,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Any),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2158,7 +2598,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferSockets,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Sockets),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2180,7 +2620,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferCores,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Cores),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2202,7 +2642,7 @@ var _ = Describe("Instancetype and Preferences", func() {
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferThreads,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Threads),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2220,11 +2660,11 @@ var _ = Describe("Instancetype and Preferences", func() {
 				instancetype.Conflicts{k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "threads")},
 				fmt.Sprintf(instancetype.InsufficientVMCPUResourcesErrorFmt, uint32(1), uint32(2), "threads"),
 			),
-			Entry("by a VM for vCPUs using PreferSpread",
+			Entry("by a VM for vCPUs using PreferSpread by default across SocketsCores",
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferSpread,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Spread),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2240,14 +2680,67 @@ var _ = Describe("Instancetype and Preferences", func() {
 						},
 					},
 				},
-				instancetype.Conflicts{k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "cores"), k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "sockets")},
-				fmt.Sprintf(instancetype.InsufficientVMCPUResourcesErrorFmt, uint32(1), uint32(4), "cores and sockets"),
+				instancetype.Conflicts{k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "sockets"), k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "cores")},
+				fmt.Sprintf(instancetype.InsufficientVMCPUResourcesErrorFmt, uint32(1), uint32(4), instancetypev1beta1.SpreadAcrossSocketsCores),
+			),
+			Entry("by a VM for vCPUs using PreferSpread across CoresThreads",
+				nil,
+				&instancetypev1beta1.VirtualMachinePreferenceSpec{
+					CPU: &instancetypev1beta1.CPUPreferences{
+						SpreadOptions: &instancetypev1beta1.SpreadOptions{
+							Across: pointer.P(instancetypev1beta1.SpreadAcrossCoresThreads),
+						},
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Spread),
+					},
+					Requirements: &instancetypev1beta1.PreferenceRequirements{
+						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
+							Guest: uint32(4),
+						},
+					},
+				},
+				&v1.VirtualMachineInstanceSpec{
+					Domain: v1.DomainSpec{
+						CPU: &v1.CPU{
+							Cores:   uint32(1),
+							Threads: uint32(1),
+						},
+					},
+				},
+				instancetype.Conflicts{k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "cores"), k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "threads")},
+				fmt.Sprintf(instancetype.InsufficientVMCPUResourcesErrorFmt, uint32(1), uint32(4), instancetypev1beta1.SpreadAcrossCoresThreads),
+			),
+			Entry("by a VM for vCPUs using PreferSpread across SocketsCoresThreads",
+				nil,
+				&instancetypev1beta1.VirtualMachinePreferenceSpec{
+					CPU: &instancetypev1beta1.CPUPreferences{
+						SpreadOptions: &instancetypev1beta1.SpreadOptions{
+							Across: pointer.P(instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
+						},
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Spread),
+					},
+					Requirements: &instancetypev1beta1.PreferenceRequirements{
+						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
+							Guest: uint32(4),
+						},
+					},
+				},
+				&v1.VirtualMachineInstanceSpec{
+					Domain: v1.DomainSpec{
+						CPU: &v1.CPU{
+							Sockets: uint32(1),
+							Cores:   uint32(1),
+							Threads: uint32(1),
+						},
+					},
+				},
+				instancetype.Conflicts{k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "sockets"), k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "cores"), k8sfield.NewPath("spec", "template", "spec", "domain", "cpu", "threads")},
+				fmt.Sprintf(instancetype.InsufficientVMCPUResourcesErrorFmt, uint32(1), uint32(4), instancetypev1beta1.SpreadAcrossSocketsCoresThreads),
 			),
 			Entry("by a VM for vCPUs using PreferAny",
 				nil,
 				&instancetypev1beta1.VirtualMachinePreferenceSpec{
 					CPU: &instancetypev1beta1.CPUPreferences{
-						PreferredCPUTopology: &preferAny,
+						PreferredCPUTopology: pointer.P(instancetypev1beta1.Any),
 					},
 					Requirements: &instancetypev1beta1.PreferenceRequirements{
 						CPU: &instancetypev1beta1.CPUPreferenceRequirement{
@@ -2290,6 +2783,5 @@ var _ = Describe("Instancetype and Preferences", func() {
 				instancetype.Conflicts{k8sfield.NewPath("spec", "template", "spec", "domain", "memory")},
 				fmt.Sprintf(instancetype.InsufficientVMMemoryResourcesErrorFmt, "1Gi", "2Gi"),
 			))
-
 	})
 })

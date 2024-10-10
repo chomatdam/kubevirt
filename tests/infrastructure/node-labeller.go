@@ -27,29 +27,26 @@ import (
 	"strings"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/libinfra"
-
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
-	"kubevirt.io/kubevirt/tests/events"
-	"kubevirt.io/kubevirt/tests/testsuite"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"kubevirt.io/kubevirt/tests/libnode"
-	"kubevirt.io/kubevirt/tests/util"
 
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests/libvmi"
-
+	"kubevirt.io/kubevirt/pkg/libvmi"
 	nodelabellerutil "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/events"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libinfra"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
+	"kubevirt.io/kubevirt/tests/libnode"
+	"kubevirt.io/kubevirt/tests/libvmifact"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 var _ = DescribeInfra("Node-labeller", func() {
@@ -145,7 +142,7 @@ var _ = DescribeInfra("Node-labeller", func() {
 			}
 			kvConfig := v1.KubeVirtConfiguration{ObsoleteCPUModels: map[string]bool{}}
 			// trigger reconciliation
-			tests.UpdateKubeVirtConfigValueAndWait(kvConfig)
+			config.UpdateKubeVirtConfigValueAndWait(kvConfig)
 
 			Eventually(func() bool {
 				nodesWithKVM = libnode.GetNodesWithKVM()
@@ -202,15 +199,23 @@ var _ = DescribeInfra("Node-labeller", func() {
 		})
 
 		It("[test_id:6247] should set default obsolete cpu models filter when obsolete-cpus-models is not set in kubevirt config", func() {
+			kvConfig := libkubevirt.GetCurrentKv(virtClient)
+			kvConfig.Spec.Configuration.ObsoleteCPUModels = nil
+			config.UpdateKubeVirtConfigValueAndWait(kvConfig.Spec.Configuration)
 			node := nodesWithKVM[0]
-
-			for key := range node.Labels {
-				if strings.Contains(key, v1.CPUModelLabel) {
-					model := strings.TrimPrefix(key, v1.CPUModelLabel)
-					Expect(nodelabellerutil.DefaultObsoleteCPUModels).ToNot(HaveKey(model),
-						"Node can't contain label with cpu model, which is in default obsolete filter")
+			Eventually(func() error {
+				node, err = virtClient.CoreV1().Nodes().Get(context.Background(), node.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				for key := range node.Labels {
+					if strings.Contains(key, v1.CPUModelLabel) {
+						model := strings.TrimPrefix(key, v1.CPUModelLabel)
+						if _, ok := nodelabellerutil.DefaultObsoleteCPUModels[model]; ok {
+							return fmt.Errorf("node can't contain label with cpu model, which is in default obsolete filter")
+						}
+					}
 				}
-			}
+				return nil
+			}).WithTimeout(30 * time.Second).WithPolling(1 * time.Second).ShouldNot(HaveOccurred())
 		})
 
 		It("[test_id:6995]should expose tsc frequency and tsc scalability", func() {
@@ -228,11 +233,11 @@ var _ = DescribeInfra("Node-labeller", func() {
 		var originalKubeVirt *v1.KubeVirt
 
 		BeforeEach(func() {
-			originalKubeVirt = util.GetCurrentKv(virtClient)
+			originalKubeVirt = libkubevirt.GetCurrentKv(virtClient)
 		})
 
 		AfterEach(func() {
-			tests.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
+			config.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
 		})
 
 		It("[test_id:6249] should update node with new cpu model label set", func() {
@@ -250,7 +255,7 @@ var _ = DescribeInfra("Node-labeller", func() {
 				}
 			}
 
-			tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+			config.UpdateKubeVirtConfigValueAndWait(*kvConfig)
 
 			labelKeyExpectedToBeMissing := v1.CPUModelLabel + obsoleteModel
 			expectNodeLabels(node.Name, func(m map[string]string) (valid bool, errorMsg string) {
@@ -292,7 +297,7 @@ var _ = DescribeInfra("Node-labeller", func() {
 
 			kvConfig := originalKubeVirt.Spec.Configuration.DeepCopy()
 			kvConfig.ObsoleteCPUModels = obsoleteModels
-			tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+			config.UpdateKubeVirtConfigValueAndWait(*kvConfig)
 
 			expectNodeLabels(node.Name, func(m map[string]string) (valid bool, errorMsg string) {
 				found := false
@@ -318,15 +323,15 @@ var _ = DescribeInfra("Node-labeller", func() {
 
 		BeforeEach(func() {
 			node = &(libnode.GetAllSchedulableNodes(virtClient).Items[0])
-			obsoleteModel = tests.GetNodeHostModel(node)
+			obsoleteModel = libnode.GetNodeHostModel(node)
 
 			By("Updating Kubevirt CR , this should wake node-labeller ")
-			kvConfig = util.GetCurrentKv(virtClient).Spec.Configuration.DeepCopy()
+			kvConfig = libkubevirt.GetCurrentKv(virtClient).Spec.Configuration.DeepCopy()
 			if kvConfig.ObsoleteCPUModels == nil {
 				kvConfig.ObsoleteCPUModels = make(map[string]bool)
 			}
 			kvConfig.ObsoleteCPUModels[obsoleteModel] = true
-			tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+			config.UpdateKubeVirtConfigValueAndWait(*kvConfig)
 
 			Eventually(func() error {
 				node, err = virtClient.CoreV1().Nodes().Get(context.Background(), node.Name, metav1.GetOptions{})
@@ -354,7 +359,7 @@ var _ = DescribeInfra("Node-labeller", func() {
 
 		AfterEach(func() {
 			delete(kvConfig.ObsoleteCPUModels, obsoleteModel)
-			tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+			config.UpdateKubeVirtConfigValueAndWait(*kvConfig)
 
 			Eventually(func() error {
 				node, err = virtClient.CoreV1().Nodes().Get(context.Background(), node.Name, metav1.GetOptions{})
@@ -376,20 +381,20 @@ var _ = DescribeInfra("Node-labeller", func() {
 		})
 
 		It("[Serial]should not schedule vmi with host-model cpuModel to node with obsolete host-model cpuModel", func() {
-			vmi := libvmi.NewFedora(
+			vmi := libvmifact.NewFedora(
 				libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 				libvmi.WithNetwork(v1.DefaultPodNetwork()),
 			)
 			By("Making sure the vmi start running on the source node and will be able to run only in source/target nodes")
-			vmi.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": node.Name}
+			vmi.Spec.NodeSelector = map[string]string{k8sv1.LabelHostname: node.Name}
 
 			By("Starting the VirtualMachineInstance")
-			_, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Create(context.Background(), vmi)
+			_, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Create(context.Background(), vmi, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Checking that the VMI failed")
 			Eventually(func() bool {
-				vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+				vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				for _, condition := range vmi.Status.Conditions {
 					if condition.Type == v1.VirtualMachineInstanceConditionType(k8sv1.PodScheduled) && condition.Status == k8sv1.ConditionFalse {

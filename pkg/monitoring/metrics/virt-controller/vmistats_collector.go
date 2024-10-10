@@ -20,15 +20,17 @@
 package virt_controller
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/machadovilaca/operator-observability/pkg/operatormetrics"
 	k8sv1 "k8s.io/api/core/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 
 	"kubevirt.io/client-go/log"
 
 	k6tv1 "kubevirt.io/api/core/v1"
-	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
 
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/util/migrations"
@@ -50,18 +52,29 @@ var (
 
 	vmiStatsCollector = operatormetrics.Collector{
 		Metrics: []operatormetrics.Metric{
-			vmiCount,
+			vmiInfo,
 			vmiEvictionBlocker,
 		},
 		CollectCallback: vmiStatsCollectorCallback,
 	}
 
-	vmiCount = operatormetrics.NewGaugeVec(
+	vmiInfo = operatormetrics.NewGaugeVec(
 		operatormetrics.MetricOpts{
-			Name: "kubevirt_vmi_phase_count",
-			Help: "Sum of VMIs per phase and node. `phase` can be one of the following: [`Pending`, `Scheduling`, `Scheduled`, `Running`, `Succeeded`, `Failed`, `Unknown`].",
+			Name: "kubevirt_vmi_info",
+			Help: "Information about VirtualMachineInstances.",
 		},
-		[]string{"node", "phase", "os", "workload", "flavor", "instance_type", "preference"},
+		[]string{
+			// Basic info
+			"node", "namespace", "name",
+			// Domain info
+			"phase", "os", "workload", "flavor",
+			// Instance type
+			"instance_type", "preference",
+			// Guest OS info
+			"guest_os_kernel_release", "guest_os_machine", "guest_os_arch", "guest_os_name", "guest_os_version_id",
+			// State info
+			"evictable", "outdated",
+		},
 	)
 
 	vmiEvictionBlocker = operatormetrics.NewGaugeVec(
@@ -72,16 +85,6 @@ var (
 		[]string{"node", "namespace", "name"},
 	)
 )
-
-type vmiCountMetric struct {
-	Phase        string
-	OS           string
-	Workload     string
-	Flavor       string
-	InstanceType string
-	Preference   string
-	NodeName     string
-}
 
 func vmiStatsCollectorCallback() []operatormetrics.CollectorResult {
 	cachedObjs := vmiInformer.GetIndexer().List()
@@ -100,7 +103,7 @@ func vmiStatsCollectorCallback() []operatormetrics.CollectorResult {
 }
 
 func reportVmisStats(vmis []*k6tv1.VirtualMachineInstance) []operatormetrics.CollectorResult {
-	phaseResults := getVmisPhase(vmis)
+	phaseResults := collectVMIInfo(vmis)
 	evictionBlockerResults := getEvictionBlocker(vmis)
 
 	results := make([]operatormetrics.CollectorResult, 0, len(phaseResults)+len(evictionBlockerResults))
@@ -109,141 +112,152 @@ func reportVmisStats(vmis []*k6tv1.VirtualMachineInstance) []operatormetrics.Col
 	return results
 }
 
-func getVmisPhase(vmis []*k6tv1.VirtualMachineInstance) []operatormetrics.CollectorResult {
+func collectVMIInfo(vmis []*k6tv1.VirtualMachineInstance) []operatormetrics.CollectorResult {
 	var cr []operatormetrics.CollectorResult
 
-	countMap := makeVMICountMetricMap(vmis)
+	for _, vmi := range vmis {
+		os, workload, flavor := getSystemInfoFromAnnotations(vmi.Annotations)
+		instanceType := getVMIInstancetype(vmi)
+		preference := getVMIPreference(vmi)
+		kernelRelease, guestOSMachineArch, name, versionID := getGuestOSInfo(vmi)
+		guestOSMachineType := getVMIMachine(vmi)
 
-	for vmc, count := range countMap {
 		cr = append(cr, operatormetrics.CollectorResult{
-			Metric: vmiCount,
-			Labels: []string{vmc.NodeName, vmc.Phase, vmc.OS, vmc.Workload, vmc.Flavor, vmc.InstanceType, vmc.Preference},
-			Value:  float64(count),
+			Metric: vmiInfo,
+			Labels: []string{
+				vmi.Status.NodeName, vmi.Namespace, vmi.Name,
+				getVMIPhase(vmi), os, workload, flavor, instanceType, preference,
+				kernelRelease, guestOSMachineType, guestOSMachineArch, name, versionID,
+				strconv.FormatBool(isVMEvictable(vmi)),
+				strconv.FormatBool(isVMIOutdated(vmi)),
+			},
+			Value: 1.0,
 		})
 	}
 
 	return cr
 }
 
-func makeVMICountMetricMap(vmis []*k6tv1.VirtualMachineInstance) map[vmiCountMetric]uint64 {
-	countMap := make(map[vmiCountMetric]uint64)
-
-	for _, vmi := range vmis {
-		vmc := newVMICountMetric(vmi)
-		countMap[vmc]++
-	}
-	return countMap
+func getVMIPhase(vmi *k6tv1.VirtualMachineInstance) string {
+	return strings.ToLower(string(vmi.Status.Phase))
 }
 
-func newVMICountMetric(vmi *k6tv1.VirtualMachineInstance) vmiCountMetric {
-	vmc := vmiCountMetric{
-		Phase:        strings.ToLower(string(vmi.Status.Phase)),
-		OS:           none,
-		Workload:     none,
-		Flavor:       none,
-		InstanceType: none,
-		Preference:   none,
-		NodeName:     vmi.Status.NodeName,
-	}
+func getSystemInfoFromAnnotations(annotations map[string]string) (os, workload, flavor string) {
+	os = none
+	workload = none
+	flavor = none
 
-	updateFromAnnotations(&vmc, vmi.Annotations)
-
-	return vmc
-}
-
-func updateFromAnnotations(vmc *vmiCountMetric, annotations map[string]string) {
 	if val, ok := annotations[annotationPrefix+"os"]; ok {
-		vmc.OS = val
+		os = val
 	}
 
 	if val, ok := annotations[annotationPrefix+"workload"]; ok {
-		vmc.Workload = val
+		workload = val
 	}
 
 	if val, ok := annotations[annotationPrefix+"flavor"]; ok {
-		vmc.Flavor = val
+		flavor = val
 	}
 
-	setInstancetypeFromAnnotations(vmc, annotations)
-	setPreferenceFromAnnotations(vmc, annotations)
+	return
 }
 
-func setInstancetypeFromAnnotations(vmc *vmiCountMetric, annotations map[string]string) {
-	if instancetypeName, ok := annotations[k6tv1.InstancetypeAnnotation]; ok {
-		vmc.InstanceType = other
+func getGuestOSInfo(vmi *k6tv1.VirtualMachineInstance) (kernelRelease, guestOSMachineArch, name, versionID string) {
 
-		obj, ok, err := instanceTypeInformer.GetIndexer().GetByKey(instancetypeName)
-		if err != nil || !ok {
-			return
-		}
-
-		vendorName := obj.(*instancetypev1beta1.VirtualMachineInstancetype).Labels[instancetypeVendorLabel]
-		if _, isWhitelisted := whitelistedInstanceTypeVendors[vendorName]; isWhitelisted {
-			vmc.InstanceType = instancetypeName
-		}
+	if vmi.Status.GuestOSInfo == (k6tv1.VirtualMachineInstanceGuestOSInfo{}) {
+		return
 	}
 
-	if instancetypeName, ok := annotations[k6tv1.ClusterInstancetypeAnnotation]; ok {
-		vmc.InstanceType = other
-
-		obj, ok, err := clusterInstanceTypeInformer.GetIndexer().GetByKey(instancetypeName)
-		if err != nil || !ok {
-			return
-		}
-
-		vendorName := obj.(*instancetypev1beta1.VirtualMachineClusterInstancetype).Labels[instancetypeVendorLabel]
-		if _, isWhitelisted := whitelistedInstanceTypeVendors[vendorName]; isWhitelisted {
-			vmc.InstanceType = instancetypeName
-		}
+	if vmi.Status.GuestOSInfo.KernelRelease != "" {
+		kernelRelease = vmi.Status.GuestOSInfo.KernelRelease
 	}
+
+	if vmi.Status.GuestOSInfo.Machine != "" {
+		guestOSMachineArch = vmi.Status.GuestOSInfo.Machine
+	}
+
+	if vmi.Status.GuestOSInfo.Name != "" {
+		name = vmi.Status.GuestOSInfo.Name
+	}
+
+	if vmi.Status.GuestOSInfo.VersionID != "" {
+		versionID = vmi.Status.GuestOSInfo.VersionID
+	}
+
+	return
 }
 
-func setPreferenceFromAnnotations(vmc *vmiCountMetric, annotations map[string]string) {
-	if instancetypeName, ok := annotations[k6tv1.PreferenceAnnotation]; ok {
-		vmc.Preference = other
-
-		obj, ok, err := preferenceInformer.GetIndexer().GetByKey(instancetypeName)
-		if err != nil || !ok {
-			return
-		}
-
-		vendorName := obj.(*instancetypev1beta1.VirtualMachinePreference).Labels[instancetypeVendorLabel]
-		if _, isWhitelisted := whitelistedInstanceTypeVendors[vendorName]; isWhitelisted {
-			vmc.Preference = instancetypeName
-		}
+func getVMIMachine(vmi *k6tv1.VirtualMachineInstance) (guestOSMachineType string) {
+	if vmi.Status.Machine != nil {
+		guestOSMachineType = vmi.Status.Machine.Type
 	}
 
-	if instancetypeName, ok := annotations[k6tv1.ClusterPreferenceAnnotation]; ok {
-		vmc.Preference = other
+	return
+}
 
-		obj, ok, err := clusterPreferenceInformer.GetIndexer().GetByKey(instancetypeName)
-		if err != nil || !ok {
-			return
-		}
-
-		vendorName := obj.(*instancetypev1beta1.VirtualMachineClusterPreference).Labels[instancetypeVendorLabel]
-		if _, isWhitelisted := whitelistedInstanceTypeVendors[vendorName]; isWhitelisted {
-			vmc.Preference = instancetypeName
-		}
+func getVMIInstancetype(vmi *k6tv1.VirtualMachineInstance) string {
+	if instancetypeName, ok := vmi.Annotations[k6tv1.InstancetypeAnnotation]; ok {
+		return fetchResourceName(instancetypeName, instanceTypeInformer.GetIndexer())
 	}
+
+	if instancetypeName, ok := vmi.Annotations[k6tv1.ClusterInstancetypeAnnotation]; ok {
+		return fetchResourceName(instancetypeName, clusterInstanceTypeInformer.GetIndexer())
+	}
+
+	return none
+}
+
+func getVMIPreference(vmi *k6tv1.VirtualMachineInstance) string {
+	if instancetypeName, ok := vmi.Annotations[k6tv1.PreferenceAnnotation]; ok {
+		return fetchResourceName(instancetypeName, preferenceInformer.GetIndexer())
+	}
+
+	if instancetypeName, ok := vmi.Annotations[k6tv1.ClusterPreferenceAnnotation]; ok {
+		return fetchResourceName(instancetypeName, clusterPreferenceInformer.GetIndexer())
+	}
+
+	return none
+}
+
+func fetchResourceName(name string, indexer cache.Indexer) string {
+	obj, ok, err := indexer.GetByKey(name)
+	if err != nil || !ok {
+		return other
+	}
+
+	apiObj, ok := obj.(v1.Object)
+	if !ok {
+		return other
+	}
+
+	vendorName := apiObj.GetLabels()[instancetypeVendorLabel]
+	if _, isWhitelisted := whitelistedInstanceTypeVendors[vendorName]; isWhitelisted {
+		return name
+	}
+
+	return other
 }
 
 func getEvictionBlocker(vmis []*k6tv1.VirtualMachineInstance) []operatormetrics.CollectorResult {
 	var cr []operatormetrics.CollectorResult
 
 	for _, vmi := range vmis {
+		nonEvictable := 1.0
+		if isVMEvictable(vmi) {
+			nonEvictable = 0.0
+		}
+
 		cr = append(cr, operatormetrics.CollectorResult{
 			Metric: vmiEvictionBlocker,
 			Labels: []string{vmi.Status.NodeName, vmi.Namespace, vmi.Name},
-			Value:  getNonEvictableVM(vmi),
+			Value:  nonEvictable,
 		})
 	}
 
 	return cr
 }
 
-func getNonEvictableVM(vmi *k6tv1.VirtualMachineInstance) float64 {
-	setVal := 0.0
+func isVMEvictable(vmi *k6tv1.VirtualMachineInstance) bool {
 	if migrations.VMIMigratableOnEviction(clusterConfig, vmi) {
 		vmiIsMigratableCond := controller.NewVirtualMachineInstanceConditionManager().
 			GetCondition(vmi, k6tv1.VirtualMachineInstanceIsMigratable)
@@ -251,9 +265,14 @@ func getNonEvictableVM(vmi *k6tv1.VirtualMachineInstance) float64 {
 		// As this metric is used for user alert we refer to be conservative - so if the VirtualMachineInstanceIsMigratable
 		// condition is still not set we treat the VM as if it's "not migratable"
 		if vmiIsMigratableCond == nil || vmiIsMigratableCond.Status == k8sv1.ConditionFalse {
-			setVal = 1.0
+			return false
 		}
 
 	}
-	return setVal
+	return true
+}
+
+func isVMIOutdated(vmi *k6tv1.VirtualMachineInstance) bool {
+	_, hasOutdatedLabel := vmi.Labels[k6tv1.OutdatedLauncherImageLabel]
+	return hasOutdatedLabel
 }

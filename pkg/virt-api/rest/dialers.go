@@ -12,6 +12,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
+	kvcorev1 "kubevirt.io/client-go/kubevirt/typed/core/v1"
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/virt-api/definitions"
@@ -31,7 +32,7 @@ func (h handlerDial) Dial(vmi *v1.VirtualMachineInstance) (*websocket.Conn, *err
 	if statusError != nil {
 		return nil, statusError
 	}
-	conn, _, err := kubecli.Dial(url, h.app.handlerTLSConfiguration)
+	conn, _, err := kvcorev1.Dial(url, h.app.handlerTLSConfiguration)
 	if err != nil {
 		return nil, errors.NewInternalError(fmt.Errorf("dialing virt-handler: %w", err))
 	}

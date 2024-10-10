@@ -21,6 +21,7 @@ package virt_controller
 
 import (
 	"github.com/machadovilaca/operator-observability/pkg/operatormetrics"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"kubevirt.io/client-go/log"
 
 	k6tv1 "kubevirt.io/api/core/v1"
@@ -28,9 +29,37 @@ import (
 
 var (
 	vmStatsCollector = operatormetrics.Collector{
-		Metrics:         timestampMetrics,
+		Metrics:         append(timestampMetrics, vmResourceRequests, vmInfo),
 		CollectCallback: vmStatsCollectorCallback,
 	}
+
+	vmInfo = operatormetrics.NewGaugeVec(
+		operatormetrics.MetricOpts{
+			Name: "kubevirt_vm_info",
+			Help: "Information about Virtual Machines.",
+		},
+		[]string{
+			// Basic info
+			"name", "namespace",
+
+			// VM annotations
+			"os", "workload", "flavor",
+
+			// Instance type
+			"instance_type", "preference",
+
+			// Status
+			"status", "status_group",
+		},
+	)
+
+	vmResourceRequests = operatormetrics.NewGaugeVec(
+		operatormetrics.MetricOpts{
+			Name: "kubevirt_vm_resource_requests",
+			Help: "Resources requested by Virtual Machine. Reports memory and CPU requests.",
+		},
+		[]string{"name", "namespace", "resource", "unit"},
+	)
 
 	timestampMetrics = []operatormetrics.Metric{
 		startingTimestamp,
@@ -127,7 +156,172 @@ func vmStatsCollectorCallback() []operatormetrics.CollectorResult {
 		vms[i] = obj.(*k6tv1.VirtualMachine)
 	}
 
-	return reportVmsStats(vms)
+	var results []operatormetrics.CollectorResult
+	results = append(results, CollectVMsInfo(vms)...)
+	results = append(results, CollectResourceRequests(vms)...)
+	results = append(results, reportVmsStats(vms)...)
+	return results
+}
+
+func CollectVMsInfo(vms []*k6tv1.VirtualMachine) []operatormetrics.CollectorResult {
+	var results []operatormetrics.CollectorResult
+
+	for _, vm := range vms {
+		os, workload, flavor := none, none, none
+		if vm.Spec.Template != nil {
+			os, workload, flavor = getSystemInfoFromAnnotations(vm.Spec.Template.ObjectMeta.Annotations)
+		}
+
+		instanceType := getVMInstancetype(vm)
+		preference := getVMPreference(vm)
+
+		results = append(results, operatormetrics.CollectorResult{
+			Metric: vmInfo,
+			Labels: []string{
+				vm.Name, vm.Namespace,
+				os, workload, flavor,
+				instanceType, preference,
+				string(vm.Status.PrintableStatus), getVMStatusGroup(vm.Status.PrintableStatus),
+			},
+			Value: 1.0,
+		})
+	}
+
+	return results
+}
+
+func getVMInstancetype(vm *k6tv1.VirtualMachine) string {
+	instancetype := vm.Spec.Instancetype
+
+	if instancetype == nil {
+		return none
+	}
+
+	if instancetype.Kind == "VirtualMachineInstancetype" {
+		return fetchResourceName(instancetype.Name, instanceTypeInformer.GetIndexer())
+	}
+
+	if instancetype.Kind == "VirtualMachineClusterInstancetype" {
+		return fetchResourceName(instancetype.Name, clusterInstanceTypeInformer.GetIndexer())
+	}
+
+	return none
+}
+
+func getVMPreference(vm *k6tv1.VirtualMachine) string {
+	preference := vm.Spec.Preference
+
+	if preference == nil {
+		return none
+	}
+
+	if preference.Kind == "VirtualMachinePreference" {
+		return fetchResourceName(preference.Name, preferenceInformer.GetIndexer())
+	}
+
+	if preference.Kind == "VirtualMachineClusterPreference" {
+		return fetchResourceName(preference.Name, clusterPreferenceInformer.GetIndexer())
+	}
+
+	return none
+}
+
+func getVMStatusGroup(status k6tv1.VirtualMachinePrintableStatus) string {
+	switch {
+	case containsStatus(status, startingStatuses):
+		return "starting"
+	case containsStatus(status, runningStatuses):
+		return "running"
+	case containsStatus(status, migratingStatuses):
+		return "migrating"
+	case containsStatus(status, nonRunningStatuses):
+		return "non_running"
+	case containsStatus(status, errorStatuses):
+		return "error"
+	}
+
+	return "<unknown>"
+}
+
+func CollectResourceRequests(vms []*k6tv1.VirtualMachine) []operatormetrics.CollectorResult {
+	var results []operatormetrics.CollectorResult
+
+	for _, vm := range vms {
+		results = append(results, collectMemoryResourceRequestsFromDomain(vm)...)
+		results = append(results, collectCpuResourceRequestsFromDomain(vm)...)
+		results = append(results, collectCpuResourceRequestsFromResources(vm)...)
+	}
+
+	return results
+}
+
+func collectMemoryResourceRequestsFromDomain(vm *k6tv1.VirtualMachine) []operatormetrics.CollectorResult {
+	if vm.Spec.Template == nil {
+		return []operatormetrics.CollectorResult{}
+	}
+
+	memoryRequested := vm.Spec.Template.Spec.Domain.Resources.Requests.Memory()
+	if memoryRequested.IsZero() {
+		return []operatormetrics.CollectorResult{}
+	}
+
+	return []operatormetrics.CollectorResult{{
+		Metric: vmResourceRequests,
+		Value:  float64(memoryRequested.Value()),
+		Labels: []string{vm.Name, vm.Namespace, "memory", "bytes"},
+	}}
+}
+
+func collectCpuResourceRequestsFromDomain(vm *k6tv1.VirtualMachine) []operatormetrics.CollectorResult {
+	var cr []operatormetrics.CollectorResult
+
+	if vm.Spec.Template.Spec.Domain.CPU == nil {
+		return cr
+	}
+
+	if vm.Spec.Template.Spec.Domain.CPU.Cores != 0 {
+		cr = append(cr, operatormetrics.CollectorResult{
+			Metric: vmResourceRequests,
+			Value:  float64(vm.Spec.Template.Spec.Domain.CPU.Cores),
+			Labels: []string{vm.Name, vm.Namespace, "cpu", "cores"},
+		})
+	}
+
+	if vm.Spec.Template.Spec.Domain.CPU.Threads != 0 {
+		cr = append(cr, operatormetrics.CollectorResult{
+			Metric: vmResourceRequests,
+			Value:  float64(vm.Spec.Template.Spec.Domain.CPU.Threads),
+			Labels: []string{vm.Name, vm.Namespace, "cpu", "threads"},
+		})
+	}
+
+	if vm.Spec.Template.Spec.Domain.CPU.Sockets != 0 {
+		cr = append(cr, operatormetrics.CollectorResult{
+			Metric: vmResourceRequests,
+			Value:  float64(vm.Spec.Template.Spec.Domain.CPU.Sockets),
+			Labels: []string{vm.Name, vm.Namespace, "cpu", "sockets"},
+		})
+	}
+
+	return cr
+}
+
+func collectCpuResourceRequestsFromResources(vm *k6tv1.VirtualMachine) []operatormetrics.CollectorResult {
+	var cr []operatormetrics.CollectorResult
+
+	cpuRequests := vm.Spec.Template.Spec.Domain.Resources.Requests.Cpu()
+
+	if cpuRequests == nil || cpuRequests.IsZero() {
+		return cr
+	}
+
+	cr = append(cr, operatormetrics.CollectorResult{
+		Metric: vmResourceRequests,
+		Value:  float64(cpuRequests.ScaledValue(resource.Milli)) / 1000,
+		Labels: []string{vm.Name, vm.Namespace, "cpu", "cores"},
+	})
+
+	return cr
 }
 
 func reportVmsStats(vms []*k6tv1.VirtualMachine) []operatormetrics.CollectorResult {

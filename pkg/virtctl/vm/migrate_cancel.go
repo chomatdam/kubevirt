@@ -20,6 +20,7 @@
 package vm
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -37,7 +38,7 @@ func NewMigrateCancelCommand(clientConfig clientcmd.ClientConfig) *cobra.Command
 		Use:     "migrate-cancel (VM)",
 		Short:   "Cancel migration of a virtual machine.",
 		Example: usage(COMMAND_MIGRATE_CANCEL),
-		Args:    templates.ExactArgs("migrate-cancel", 1),
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := Command{command: COMMAND_MIGRATE_CANCEL, clientConfig: clientConfig}
 			return c.migrateCancelRun(args)
@@ -57,7 +58,7 @@ func (o *Command) migrateCancelRun(args []string) error {
 
 	// get a list of migrations for vmiName (use LabelSelector filter)
 	labelselector := fmt.Sprintf("%s==%s", v1.MigrationSelectorLabel, vmiName)
-	migrations, err := virtClient.VirtualMachineInstanceMigration(namespace).List(&metav1.ListOptions{
+	migrations, err := virtClient.VirtualMachineInstanceMigration(namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: labelselector})
 	if err != nil {
 		return fmt.Errorf("Error fetching virtual machine instance migration list  %v", err)
@@ -71,7 +72,7 @@ func (o *Command) migrateCancelRun(args []string) error {
 
 		if !mig.IsFinal() {
 			// Cancel the active migration by calling Delete
-			err = virtClient.VirtualMachineInstanceMigration(namespace).Delete(migname, &metav1.DeleteOptions{})
+			err = virtClient.VirtualMachineInstanceMigration(namespace).Delete(context.Background(), migname, metav1.DeleteOptions{})
 			if err != nil {
 				return fmt.Errorf("Error canceling migration %s of a VirtualMachine %s: %v", migname, vmiName, err)
 			}

@@ -76,11 +76,16 @@ var MigrationGroupVersionResource = metav1.GroupVersionResource{
 type Informers struct {
 	VMIPresetInformer  cache.SharedIndexInformer
 	VMRestoreInformer  cache.SharedIndexInformer
+	DataVolumeInformer cache.SharedIndexInformer
 	DataSourceInformer cache.SharedIndexInformer
 	NamespaceInformer  cache.SharedIndexInformer
 }
 
-func IsKubeVirtServiceAccount(serviceAccount string) bool {
+func isComponentServiceAccount(serviceAccount, namespace, component string) bool {
+	return serviceAccount == fmt.Sprintf("system:serviceaccount:%s:%s", namespace, component)
+}
+
+func GetNamespace() string {
 	ns, err := clientutil.GetNamespace()
 	logger := log.DefaultLogger()
 
@@ -88,23 +93,28 @@ func IsKubeVirtServiceAccount(serviceAccount string) bool {
 		logger.Info("Failed to get namespace. Fallback to default: 'kubevirt'")
 		ns = "kubevirt"
 	}
+	return ns
+}
 
-	prefix := fmt.Sprintf("system:serviceaccount:%s", ns)
-	return serviceAccount == fmt.Sprintf("%s:%s", prefix, components.ApiServiceAccountName) ||
-		serviceAccount == fmt.Sprintf("%s:%s", prefix, components.HandlerServiceAccountName) ||
-		serviceAccount == fmt.Sprintf("%s:%s", prefix, components.ControllerServiceAccountName)
+// IsKubeVirtServiceAccount returns true in case `serviceAccount` belongs to one of
+// KubeVirt's main components
+//
+// Deprecated: because it directly reads the namespace from the file-system
+func IsKubeVirtServiceAccount(serviceAccount string) bool {
+	ns := GetNamespace()
+
+	return isComponentServiceAccount(serviceAccount, ns, components.ApiServiceAccountName) ||
+		isComponentServiceAccount(serviceAccount, ns, components.HandlerServiceAccountName) ||
+		isComponentServiceAccount(serviceAccount, ns, components.ControllerServiceAccountName)
 }
 
 func IsARM64(vmiSpec *v1.VirtualMachineInstanceSpec) bool {
-	if vmiSpec.Architecture == "arm64" {
-		return true
-	}
-	return false
+	return vmiSpec.Architecture == "arm64"
 }
 
 func IsPPC64(vmiSpec *v1.VirtualMachineInstanceSpec) bool {
-	if vmiSpec.Architecture == "ppc64le" {
-		return true
-	}
-	return false
+	return vmiSpec.Architecture == "ppc64le"
+}
+func IsS390X(vmiSpec *v1.VirtualMachineInstanceSpec) bool {
+	return vmiSpec.Architecture == "s390x"
 }

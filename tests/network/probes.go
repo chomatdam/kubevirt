@@ -5,26 +5,27 @@ import (
 	"fmt"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
 	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	corev1 "k8s.io/api/core/v1"
+
+	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-
-	"kubevirt.io/kubevirt/tests/testsuite"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/libvmi"
 	"kubevirt.io/kubevirt/tests/console"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	"kubevirt.io/kubevirt/tests/framework/matcher"
 	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/libnet/vmnetserver"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libpod"
+	"kubevirt.io/kubevirt/tests/libvmifact"
+	"kubevirt.io/kubevirt/tests/libvmops"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 const (
@@ -42,26 +43,26 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 		err           error
 		virtClient    kubecli.KubevirtClient
 		vmi           *v1.VirtualMachineInstance
-		blankIPFamily = *new(corev1.IPFamily)
+		blankIPFamily = *new(k8sv1.IPFamily)
 	)
 
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
 	})
 
-	buildProbeBackendPodSpec := func(ipFamily corev1.IPFamily, probe *v1.Probe) (*corev1.Pod, func() error) {
+	buildProbeBackendPodSpec := func(ipFamily k8sv1.IPFamily, probe *v1.Probe) (*k8sv1.Pod, func() error) {
 		family := 4
-		if ipFamily == corev1.IPv6Protocol {
+		if ipFamily == k8sv1.IPv6Protocol {
 			family = 6
 		}
 
-		var probeBackendPod *corev1.Pod
+		var probeBackendPod *k8sv1.Pod
 		if isHTTPProbe(*probe) {
 			port := probe.HTTPGet.Port.IntVal
-			probeBackendPod = tests.StartHTTPServerPod(family, int(port))
+			probeBackendPod = startHTTPServerPod(family, int(port))
 		} else {
 			port := probe.TCPSocket.Port.IntVal
-			probeBackendPod = tests.StartTCPServerPod(family, int(port))
+			probeBackendPod = startTCPServerPod(family, int(port))
 		}
 		return probeBackendPod, func() error {
 			return virtClient.CoreV1().Pods(testsuite.GetTestNamespace(probeBackendPod)).Delete(context.Background(), probeBackendPod.Name, metav1.DeleteOptions{})
@@ -79,10 +80,10 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 		tcpProbe := createTCPProbe(period, initialSeconds, port)
 		httpProbe := createHTTPProbe(period, initialSeconds, port)
 
-		DescribeTable("should succeed", func(readinessProbe *v1.Probe, ipFamily corev1.IPFamily) {
+		DescribeTable("should succeed", func(readinessProbe *v1.Probe, ipFamily k8sv1.IPFamily) {
 			libnet.SkipWhenClusterNotSupportIPFamily(ipFamily)
 
-			if ipFamily == corev1.IPv6Protocol {
+			if ipFamily == k8sv1.IPv6Protocol {
 				By("Create a support pod which will reply to kubelet's probes ...")
 				probeBackendPod, supportPodCleanupFunc := buildProbeBackendPodSpec(ipFamily, readinessProbe)
 				defer func() {
@@ -105,9 +106,8 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 				serverStarter(vmi, readinessProbe, 1500)
 			} else {
 				By(specifyingVMReadinessProbe)
-				vmi = libvmi.NewFedora(
-					withMasqueradeNetworkingAndFurtherUserConfig(withReadinessProbe(readinessProbe))...)
-				vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
+				vmi = libvmifact.NewFedora(libnet.WithMasqueradeNetworking(), withReadinessProbe(readinessProbe))
+				vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
 
 				By("Waiting for agent to connect")
 				Eventually(matcher.ThisVMI(vmi), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
@@ -115,10 +115,10 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 
 			Eventually(matcher.ThisVMI(vmi), 2*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceReady))
 		},
-			Entry("[test_id:1202][posneg:positive]with working TCP probe and tcp server on ipv4", tcpProbe, corev1.IPv4Protocol),
-			Entry("[test_id:1202][posneg:positive]with working TCP probe and tcp server on ipv6", tcpProbe, corev1.IPv6Protocol),
-			Entry("[test_id:1200][posneg:positive]with working HTTP probe and http server on ipv4", httpProbe, corev1.IPv4Protocol),
-			Entry("[test_id:1200][posneg:positive]with working HTTP probe and http server on ipv6", httpProbe, corev1.IPv6Protocol),
+			Entry("[test_id:1202][posneg:positive]with working TCP probe and tcp server on ipv4", tcpProbe, k8sv1.IPv4Protocol),
+			Entry("[test_id:1202][posneg:positive]with working TCP probe and tcp server on ipv6", tcpProbe, k8sv1.IPv6Protocol),
+			Entry("[test_id:1200][posneg:positive]with working HTTP probe and http server on ipv4", httpProbe, k8sv1.IPv4Protocol),
+			Entry("[test_id:1200][posneg:positive]with working HTTP probe and http server on ipv6", httpProbe, k8sv1.IPv6Protocol),
 			Entry("[test_id:TODO]with working Exec probe", createExecProbe(period, initialSeconds, timeoutSeconds, "uname", "-a"), blankIPFamily),
 		)
 
@@ -128,11 +128,8 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 			)
 
 			BeforeEach(func() {
-				vmi = libvmi.NewFedora(
-					withMasqueradeNetworkingAndFurtherUserConfig(
-						withReadinessProbe(
-							createGuestAgentPingProbe(period, initialSeconds)))...)
-				vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
+				vmi = libvmifact.NewFedora(libnet.WithMasqueradeNetworking(), withReadinessProbe(createGuestAgentPingProbe(period, initialSeconds)))
+				vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
 				By("Waiting for agent to connect")
 				Eventually(matcher.ThisVMI(vmi), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
 
@@ -158,15 +155,15 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 		DescribeTable("should fail", func(readinessProbe *v1.Probe, vmiFactory func(opts ...libvmi.Option) *v1.VirtualMachineInstance) {
 			By(specifyingVMReadinessProbe)
 			vmi = vmiFactory(withReadinessProbe(readinessProbe))
-			vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
+			vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
 
 			By("Checking that the VMI is consistently non-ready")
 			Consistently(matcher.ThisVMI(vmi), 30*time.Second, 100*time.Millisecond).Should(matcher.HaveConditionMissingOrFalse(v1.VirtualMachineInstanceReady))
 		},
-			Entry("[test_id:1220][posneg:negative]with working TCP probe and no running server", tcpProbe, libvmi.NewAlpine),
-			Entry("[test_id:1219][posneg:negative]with working HTTP probe and no running server", httpProbe, libvmi.NewAlpine),
-			Entry("[test_id:TODO]with working Exec probe and invalid command", createExecProbe(period, initialSeconds, timeoutSeconds, "exit", "1"), libvmi.NewFedora),
-			Entry("[test_id:TODO]with working Exec probe and infinitely running command", createExecProbe(period, initialSeconds, timeoutSeconds, "tail", "-f", "/dev/null"), libvmi.NewFedora),
+			Entry("[test_id:1220][posneg:negative]with working TCP probe and no running server", tcpProbe, libvmifact.NewAlpine),
+			Entry("[test_id:1219][posneg:negative]with working HTTP probe and no running server", httpProbe, libvmifact.NewAlpine),
+			Entry("[test_id:TODO]with working Exec probe and invalid command", createExecProbe(period, initialSeconds, timeoutSeconds, "exit", "1"), libvmifact.NewFedora),
+			Entry("[test_id:TODO]with working Exec probe and infinitely running command", createExecProbe(period, initialSeconds, timeoutSeconds, "tail", "-f", "/dev/null"), libvmifact.NewFedora),
 		)
 	})
 
@@ -181,10 +178,10 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 		tcpProbe := createTCPProbe(period, initialSeconds, port)
 		httpProbe := createHTTPProbe(period, initialSeconds, port)
 
-		DescribeTable("should not fail the VMI", func(livenessProbe *v1.Probe, ipFamily corev1.IPFamily) {
+		DescribeTable("should not fail the VMI", func(livenessProbe *v1.Probe, ipFamily k8sv1.IPFamily) {
 			libnet.SkipWhenClusterNotSupportIPFamily(ipFamily)
 
-			if ipFamily == corev1.IPv6Protocol {
+			if ipFamily == k8sv1.IPv6Protocol {
 
 				By("Create a support pod which will reply to kubelet's probes ...")
 				probeBackendPod, supportPodCleanupFunc := buildProbeBackendPodSpec(ipFamily, livenessProbe)
@@ -206,10 +203,8 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 				serverStarter(vmi, livenessProbe, 1500)
 			} else {
 				By(specifyingVMLivenessProbe)
-				vmi = libvmi.NewFedora(
-					withMasqueradeNetworkingAndFurtherUserConfig(
-						withLivelinessProbe(livenessProbe))...)
-				vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
+				vmi = libvmifact.NewFedora(libnet.WithMasqueradeNetworking(), withLivelinessProbe(livenessProbe))
+				vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
 
 				By("Waiting for agent to connect")
 				Eventually(matcher.ThisVMI(vmi), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
@@ -217,24 +212,22 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 
 			By("Checking that the VMI is still running after a while")
 			Consistently(func() bool {
-				vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+				vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return vmi.IsFinal()
 			}, 120, 1).Should(Not(BeTrue()))
 		},
-			Entry("[test_id:1199][posneg:positive]with working TCP probe and tcp server on ipv4", tcpProbe, corev1.IPv4Protocol),
-			Entry("[test_id:1199][posneg:positive]with working TCP probe and tcp server on ipv6", tcpProbe, corev1.IPv6Protocol),
-			Entry("[test_id:1201][posneg:positive]with working HTTP probe and http server on ipv4", httpProbe, corev1.IPv4Protocol),
-			Entry("[test_id:1201][posneg:positive]with working HTTP probe and http server on ipv6", httpProbe, corev1.IPv6Protocol),
+			Entry("[test_id:1199][posneg:positive]with working TCP probe and tcp server on ipv4", tcpProbe, k8sv1.IPv4Protocol),
+			Entry("[test_id:1199][posneg:positive]with working TCP probe and tcp server on ipv6", tcpProbe, k8sv1.IPv6Protocol),
+			Entry("[test_id:1201][posneg:positive]with working HTTP probe and http server on ipv4", httpProbe, k8sv1.IPv4Protocol),
+			Entry("[test_id:1201][posneg:positive]with working HTTP probe and http server on ipv6", httpProbe, k8sv1.IPv6Protocol),
 			Entry("[test_id:5879]with working Exec probe", createExecProbe(period, initialSeconds, timeoutSeconds, "uname", "-a"), blankIPFamily),
 		)
 
 		Context("guest agent ping", func() {
 			BeforeEach(func() {
-				vmi = libvmi.NewFedora(withMasqueradeNetworkingAndFurtherUserConfig(
-					withLivelinessProbe(createGuestAgentPingProbe(period, initialSeconds)),
-				)...)
-				vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
+				vmi = libvmifact.NewFedora(libnet.WithMasqueradeNetworking(), withLivelinessProbe(createGuestAgentPingProbe(period, initialSeconds)))
+				vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
 
 				By("Waiting for agent to connect")
 				Eventually(matcher.ThisVMI(vmi), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
@@ -245,7 +238,7 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 				Expect(stopGuestAgent(vmi)).To(Succeed())
 
 				Eventually(func() (*v1.VirtualMachineInstance, error) {
-					return virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+					return virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 				}, 2*time.Minute, 1*time.Second).Should(Or(matcher.BeInPhase(v1.Failed), matcher.HaveSucceeded()))
 			})
 		})
@@ -253,18 +246,18 @@ var _ = SIGDescribe("[ref_id:1182]Probes", func() {
 		DescribeTable("should fail the VMI", func(livenessProbe *v1.Probe, vmiFactory func(opts ...libvmi.Option) *v1.VirtualMachineInstance) {
 			By("Specifying a VMI with a livenessProbe probe")
 			vmi = vmiFactory(withLivelinessProbe(livenessProbe))
-			vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
+			vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
 
 			By("Checking that the VMI is in a final state after a while")
 			Eventually(func() bool {
-				vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+				vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return vmi.IsFinal()
 			}, 120, 1).Should(BeTrue())
 		},
-			Entry("[test_id:1217][posneg:negative]with working TCP probe and no running server", tcpProbe, libvmi.NewCirros),
-			Entry("[test_id:1218][posneg:negative]with working HTTP probe and no running server", httpProbe, libvmi.NewCirros),
-			Entry("[test_id:5880]with working Exec probe and invalid command", createExecProbe(period, initialSeconds, timeoutSeconds, "exit", "1"), libvmi.NewFedora),
+			Entry("[test_id:1217][posneg:negative]with working TCP probe and no running server", tcpProbe, libvmifact.NewCirros),
+			Entry("[test_id:1218][posneg:negative]with working HTTP probe and no running server", httpProbe, libvmifact.NewCirros),
+			Entry("[test_id:5880]with working Exec probe and invalid command", createExecProbe(period, initialSeconds, timeoutSeconds, "exit", "1"), libvmifact.NewFedora),
 		)
 	})
 })
@@ -293,22 +286,19 @@ func guestAgentOperation(vmi *v1.VirtualMachineInstance, startStopOperation stri
 }
 
 func createReadyAlpineVMIWithReadinessProbe(probe *v1.Probe) *v1.VirtualMachineInstance {
-	vmi := libvmi.NewAlpineWithTestTooling(
-		withMasqueradeNetworkingAndFurtherUserConfig(withReadinessProbe(probe))...)
-
-	return tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
+	vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking(), withReadinessProbe(probe))
+	return libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
 }
 
 func createReadyAlpineVMIWithLivenessProbe(probe *v1.Probe) *v1.VirtualMachineInstance {
-	vmi := libvmi.NewAlpineWithTestTooling(
-		withMasqueradeNetworkingAndFurtherUserConfig(withLivelinessProbe(probe))...)
+	vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking(), withLivelinessProbe(probe))
 
-	return tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
+	return libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 180)
 }
 
 func createTCPProbe(period int32, initialSeconds int32, port int) *v1.Probe {
 	httpHandler := v1.Handler{
-		TCPSocket: &corev1.TCPSocketAction{
+		TCPSocket: &k8sv1.TCPSocketAction{
 			Port: intstr.FromInt(port),
 		},
 	}
@@ -331,7 +321,7 @@ func patchProbeWithIPAddr(existingProbe *v1.Probe, ipHostIP string) *v1.Probe {
 
 func createHTTPProbe(period int32, initialSeconds int32, port int) *v1.Probe {
 	httpHandler := v1.Handler{
-		HTTPGet: &corev1.HTTPGetAction{
+		HTTPGet: &k8sv1.HTTPGetAction{
 			Port: intstr.FromInt(port),
 		},
 	}
@@ -339,7 +329,7 @@ func createHTTPProbe(period int32, initialSeconds int32, port int) *v1.Probe {
 }
 
 func createExecProbe(period int32, initialSeconds int32, timeoutSeconds int32, command ...string) *v1.Probe {
-	execHandler := v1.Handler{Exec: &corev1.ExecAction{Command: command}}
+	execHandler := v1.Handler{Exec: &k8sv1.ExecAction{Command: command}}
 	return createProbeSpecification(period, initialSeconds, timeoutSeconds, execHandler)
 }
 
@@ -364,17 +354,13 @@ func serverStarter(vmi *v1.VirtualMachineInstance, probe *v1.Probe, port int) {
 	}
 }
 
-func pointIpv6ProbeToSupportPod(pod *corev1.Pod, probe *v1.Probe) (*v1.Probe, error) {
-	supportPodIP := libnet.GetPodIPByFamily(pod, corev1.IPv6Protocol)
+func pointIpv6ProbeToSupportPod(pod *k8sv1.Pod, probe *v1.Probe) (*v1.Probe, error) {
+	supportPodIP := libnet.GetPodIPByFamily(pod, k8sv1.IPv6Protocol)
 	if supportPodIP == "" {
 		return nil, fmt.Errorf("pod/%s does not have an IPv6 address", pod.Name)
 	}
 
 	return patchProbeWithIPAddr(probe, supportPodIP), nil
-}
-
-func withMasqueradeNetworkingAndFurtherUserConfig(opts ...libvmi.Option) []libvmi.Option {
-	return append(libnet.WithMasqueradeNetworking(), opts...)
 }
 
 func withReadinessProbe(probe *v1.Probe) libvmi.Option {
@@ -387,4 +373,40 @@ func withLivelinessProbe(probe *v1.Probe) libvmi.Option {
 	return func(vmi *v1.VirtualMachineInstance) {
 		vmi.Spec.LivenessProbe = probe
 	}
+}
+
+func newHTTPServerPod(ipFamily, port int) *k8sv1.Pod {
+	serverCommand := fmt.Sprintf("nc -%d -klp %d --sh-exec 'echo -e \"HTTP/1.1 200 OK\\nContent-Length: 12\\n\\nHello World!\"'", ipFamily, port)
+	return libpod.RenderPrivilegedPod("http-hello-world-server", []string{"/bin/bash"}, []string{"-c", serverCommand})
+}
+
+func newTCPServerPod(ipFamily, port int) *k8sv1.Pod {
+	serverCommand := fmt.Sprintf("nc -%d -klp %d --sh-exec 'echo \"Hello World!\"'", ipFamily, port)
+	return libpod.RenderPrivilegedPod("tcp-hello-world-server", []string{"/bin/bash"}, []string{"-c", serverCommand})
+}
+
+func createPodAndWaitUntil(pod *k8sv1.Pod, phaseToWait k8sv1.PodPhase) *k8sv1.Pod {
+	virtClient := kubevirt.Client()
+
+	var err error
+	pod, err = virtClient.CoreV1().Pods(testsuite.GetTestNamespace(pod)).Create(context.Background(), pod, metav1.CreateOptions{})
+	Expect(err).ToNot(HaveOccurred(), "should succeed creating pod")
+
+	getStatus := func() k8sv1.PodPhase {
+		pod, err = virtClient.CoreV1().Pods(testsuite.GetTestNamespace(pod)).Get(context.Background(), pod.Name, metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		return pod.Status.Phase
+	}
+	Eventually(getStatus, 30, 1).Should(Equal(phaseToWait), "should reach %s phase", phaseToWait)
+	return pod
+}
+
+func startTCPServerPod(ipFamily, port int) *k8sv1.Pod {
+	By(fmt.Sprintf("Start TCP Server pod at port %d", port))
+	return createPodAndWaitUntil(newTCPServerPod(ipFamily, port), k8sv1.PodRunning)
+}
+
+func startHTTPServerPod(ipFamily, port int) *k8sv1.Pod {
+	By(fmt.Sprintf("Start HTTP Server pod at port %d", port))
+	return createPodAndWaitUntil(newHTTPServerPod(ipFamily, port), k8sv1.PodRunning)
 }

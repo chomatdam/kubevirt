@@ -23,8 +23,6 @@ import (
 	"context"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -35,13 +33,17 @@ import (
 
 	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	libvmici "kubevirt.io/kubevirt/pkg/libvmi/cloudinit"
 	network "kubevirt.io/kubevirt/pkg/network/setup"
 	netvmispec "kubevirt.io/kubevirt/pkg/network/vmispec"
+
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	"kubevirt.io/kubevirt/tests/framework/matcher"
 	"kubevirt.io/kubevirt/tests/libnet"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
-	"kubevirt.io/kubevirt/tests/util"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 const dummyInterfaceName = "dummy0"
@@ -73,22 +75,22 @@ var _ = SIGDescribe("Infosource", func() {
 
 		BeforeEach(func() {
 			By("Create NetworkAttachmentDefinition")
-			Expect(libnet.CreateNAD(util.NamespaceTestDefault, nadName)).To(Succeed())
+			Expect(libnet.CreateNAD(testsuite.NamespaceTestDefault, nadName)).To(Succeed())
 
 			defaultBridgeInterface := libvmi.InterfaceDeviceWithBridgeBinding(primaryNetwork)
 			secondaryLinuxBridgeInterface1 := libvmi.InterfaceDeviceWithBridgeBinding(secondaryNetwork1.Name)
 			secondaryLinuxBridgeInterface2 := libvmi.InterfaceDeviceWithBridgeBinding(secondaryNetwork2.Name)
-			vmiSpec := libvmi.NewFedora(
+			vmiSpec := libvmifact.NewFedora(
 				libvmi.WithInterface(*libvmi.InterfaceWithMac(&defaultBridgeInterface, primaryInterfaceMac)),
 				libvmi.WithNetwork(kvirtv1.DefaultPodNetwork()),
 				libvmi.WithInterface(*libvmi.InterfaceWithMac(&secondaryLinuxBridgeInterface1, secondaryInterface1Mac)),
 				libvmi.WithInterface(*libvmi.InterfaceWithMac(&secondaryLinuxBridgeInterface2, secondaryInterface2Mac)),
 				libvmi.WithNetwork(secondaryNetwork1),
 				libvmi.WithNetwork(secondaryNetwork2),
-				libvmi.WithCloudInitNoCloudUserData(manipulateGuestLinksScript(primaryInterfaceNewMac, dummyInterfaceMac)))
+				libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudUserData(manipulateGuestLinksScript(primaryInterfaceNewMac, dummyInterfaceMac))))
 
 			var err error
-			vmi, err = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(context.Background(), vmiSpec)
+			vmi, err = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Create(context.Background(), vmiSpec, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
 			libwait.WaitForSuccessfulVMIStart(vmi)
 			Eventually(matcher.ThisVMI(vmi), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
@@ -138,7 +140,7 @@ var _ = SIGDescribe("Infosource", func() {
 			// and then we can compare the rest of the expected info.
 			Eventually(func() bool {
 				var err error
-				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
 				return dummyInterfaceExists(vmi)

@@ -53,10 +53,10 @@ func main() {
 
 	config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
 		DeveloperConfiguration: &v1.DeveloperConfiguration{
-			FeatureGates: []string{"DataVolumes", "LiveMigration", "SRIOV", "GPU", "HostDisk", "Macvtap", "HostDevices"},
+			FeatureGates: []string{"DataVolumes", "LiveMigration", "SRIOV", "GPU", "HostDisk", "Macvtap", "HostDevices", "Sidecar"},
 		},
 		NetworkConfiguration: &v1.NetworkConfiguration{
-			PermitSlirpInterface:              &permit,
+			DeprecatedPermitSlirpInterface:    &permit,
 			PermitBridgeInterfaceOnPodNetwork: &permit,
 		},
 		PermittedHostDevices: &v1.PermittedHostDevices{
@@ -95,6 +95,7 @@ func main() {
 		utils.VmAlpineDataVolume:                                  utils.GetVMDataVolume(),
 		utils.VMPriorityClass:                                     utils.GetVMPriorityClass(),
 		utils.VmCirrosSata:                                        utils.GetVMCirrosSata(),
+		utils.VmCirrosWithHookSidecarConfigMap:                    utils.GetVMCirrosWithHookSidecarConfigMap(),
 		utils.VmCirrosInstancetypeComputeSmall:                    utils.GetVmCirrosInstancetypeComputeSmall(),
 		utils.VmCirrosClusterInstancetypeComputeSmall:             utils.GetVmCirrosClusterInstancetypeComputeSmall(),
 		utils.VmCirrosInstancetypeComputeLarge:                    utils.GetVmCirrosInstancetypeComputeLarge(),
@@ -114,7 +115,6 @@ func main() {
 		utils.VmiNoCloud:                  utils.GetVMINoCloud(),
 		utils.VmiPVC:                      utils.GetVMIPvc(),
 		utils.VmiWindows:                  utils.GetVMIWindows(),
-		utils.VmiSlirp:                    utils.GetVMISlirp(),
 		utils.VmiSRIOV:                    utils.GetVMISRIOV(),
 		utils.VmiWithHookSidecar:          utils.GetVMIWithHookSidecar(),
 		utils.VmiWithHookSidecarConfigMap: utils.GetVmiWithHookSidecarConfigMap(),
@@ -123,7 +123,6 @@ func main() {
 		utils.VmiMasquerade:               utils.GetVMIMasquerade(),
 		utils.VmiHostDisk:                 utils.GetVMIHostDisk(),
 		utils.VmiGPU:                      utils.GetVMIGPU(),
-		utils.VmiMacvtap:                  utils.GetVMIMacvtap(),
 		utils.VmiKernelBoot:               utils.GetVMIKernelBoot(),
 		utils.VmiARM:                      utils.GetVMIARM(),
 		utils.VmiUSB:                      utils.GetVMIUSB(),
@@ -143,12 +142,6 @@ func main() {
 
 	var migrations = map[string]*v1.VirtualMachineInstanceMigration{
 		utils.VmiMigration: utils.GetVMIMigration(),
-	}
-
-	var templates = map[string]*utils.Template{
-		utils.VmTemplateFedora:  utils.GetTemplateFedora(),
-		utils.VmTemplateRHEL7:   utils.GetTemplateRHEL7(),
-		utils.VmTemplateWindows: utils.GetTemplateWindows(),
 	}
 
 	var migrationPolicies = map[string]*v1alpha1.MigrationPolicy{
@@ -243,11 +236,6 @@ func main() {
 	for name, obj := range migrations {
 		causes := validating_webhook.ValidateVirtualMachineInstanceMigrationSpec(k8sfield.NewPath("spec"), &obj.Spec)
 		handleCauses(causes, name, "vmi preset")
-		handleError(dumpObject(name, *obj))
-	}
-
-	// TODO:(ihar) how to validate templates?
-	for name, obj := range templates {
 		handleError(dumpObject(name, *obj))
 	}
 

@@ -18,9 +18,8 @@ import (
 	framework "k8s.io/client-go/tools/cache/testing"
 	"k8s.io/client-go/tools/record"
 
-	"kubevirt.io/client-go/api"
-
 	v1 "kubevirt.io/api/core/v1"
+	"kubevirt.io/client-go/api"
 	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
@@ -34,7 +33,6 @@ var _ = Describe("Disruptionbudget", func() {
 	var ctrl *gomock.Controller
 	var stop chan struct{}
 	var virtClient *kubecli.MockKubevirtClient
-	var vmiInterface *kubecli.MockVirtualMachineInstanceInterface
 	var vmiSource *framework.FakeControllerSource
 	var vmiInformer cache.SharedIndexInformer
 	var pdbInformer cache.SharedIndexInformer
@@ -109,10 +107,12 @@ var _ = Describe("Disruptionbudget", func() {
 			Expect(ok).To(BeTrue())
 			Expect(patchAction.GetName()).To(Equal("pdb-" + vmi.Name))
 			Expect(patchAction.GetPatchType()).To(Equal(types.JSONPatchType))
-
-			expectedPatch := fmt.Sprintf(`[{ "op": "replace", "path": "/spec/minAvailable", "value": 1 }, { "op": "remove", "path": "/metadata/labels/%s" }]`,
-				patch.EscapeJSONPointer(v1.MigrationNameLabel))
-			Expect(string(patchAction.GetPatch())).To(Equal(expectedPatch))
+			patches := patch.New(
+				patch.WithReplace("/spec/minAvailable", 1),
+				patch.WithRemove(fmt.Sprintf("/metadata/labels/%s", patch.EscapeJSONPointer(
+					v1.MigrationNameLabel))),
+			)
+			Expect(patches.GeneratePayload()).To(Equal(patchAction.GetPatch()))
 			return true, &policyv1.PodDisruptionBudget{}, nil
 		})
 	}
@@ -131,8 +131,6 @@ var _ = Describe("Disruptionbudget", func() {
 		stop = make(chan struct{})
 		ctrl = gomock.NewController(GinkgoT())
 		virtClient = kubecli.NewMockKubevirtClient(ctrl)
-		vmiInterface = kubecli.NewMockVirtualMachineInstanceInterface(ctrl)
-
 		vmiInformer, vmiSource = testutils.NewFakeInformerFor(&v1.VirtualMachineInstance{})
 		pdbInformer, pdbSource = testutils.NewFakeInformerFor(&policyv1.PodDisruptionBudget{})
 		vmimInformer, _ = testutils.NewFakeInformerFor(&v1.VirtualMachineInstanceMigration{})
@@ -142,7 +140,6 @@ var _ = Describe("Disruptionbudget", func() {
 		initController(&v1.KubeVirtConfiguration{})
 
 		// Set up mock client
-		virtClient.EXPECT().VirtualMachineInstance(corev1.NamespaceDefault).Return(vmiInterface).AnyTimes()
 		kubeClient = fake.NewSimpleClientset()
 		virtClient.EXPECT().CoreV1().Return(kubeClient.CoreV1()).AnyTimes()
 		virtClient.EXPECT().PolicyV1().Return(kubeClient.PolicyV1()).AnyTimes()
@@ -319,6 +316,24 @@ var _ = Describe("Disruptionbudget", func() {
 			controller.Execute()
 			testutils.ExpectEvent(recorder, disruptionbudget.SuccessfulDeletePodDisruptionBudgetReason)
 		})
+
+		DescribeTable("should remove the pdb if the VMI reached Final state", func(vmiPhase v1.VirtualMachineInstancePhase) {
+			vmi := nonMigratableVirtualMachine()
+			vmi.Spec.EvictionStrategy = newEvictionStrategyLiveMigrate()
+
+			pdb := newPodDisruptionBudget(vmi, 1)
+			pdbFeeder.Add(pdb)
+
+			vmi.Status.Phase = vmiPhase
+			vmiFeeder.Add(vmi)
+
+			shouldExpectPDBDeletion(pdb)
+			controller.Execute()
+			testutils.ExpectEvent(recorder, disruptionbudget.SuccessfulDeletePodDisruptionBudgetReason)
+		},
+			Entry("with Succeeded vmi phase", v1.Succeeded),
+			Entry("with Failed vmi phase", v1.Failed),
+		)
 
 		DescribeTable("should add the pdb, if it does not exist", func(evictionStrategy v1.EvictionStrategy) {
 			vmi := migratableVirtualMachine()

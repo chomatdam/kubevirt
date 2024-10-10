@@ -25,23 +25,21 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/apimachinery/pkg/types"
-
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"kubevirt.io/kubevirt/tests/decorators"
-
-	"kubevirt.io/kubevirt/tests/libnode"
-	"kubevirt.io/kubevirt/tests/util"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/decorators"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
+	"kubevirt.io/kubevirt/tests/libnode"
 )
 
 var _ = DescribeInfra("virt-handler", func() {
@@ -100,19 +98,19 @@ var _ = DescribeInfra("virt-handler", func() {
 
 		forceMemoryPressureOnNodes(nodesToEnableKSM)
 
-		originalKubeVirt = util.GetCurrentKv(virtClient)
+		originalKubeVirt = libkubevirt.GetCurrentKv(virtClient)
 	})
 
 	AfterEach(func() {
 		restoreNodes(nodesToEnableKSM)
-		tests.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
+		config.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
 	})
 
 	It("should enable/disable ksm and add/remove annotation on all the nodes when the selector is empty", decorators.KSMRequired, func() {
 		kvConfig := originalKubeVirt.Spec.Configuration.DeepCopy()
 		ksmConfig := &v1.KSMConfiguration{NodeLabelSelector: &metav1.LabelSelector{}}
 		kvConfig.KSMConfiguration = ksmConfig
-		tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+		config.UpdateKubeVirtConfigValueAndWait(*kvConfig)
 		By("Ensure ksm is enabled and annotation is added in the expected nodes")
 		for _, node := range nodesToEnableKSM {
 			Eventually(func() (string, error) {
@@ -135,7 +133,7 @@ var _ = DescribeInfra("virt-handler", func() {
 			}, 3*time.Minute, 2*time.Second).Should(BeTrue(), fmt.Sprintf("Node %s should have %s annotation", node, v1.KSMHandlerManagedAnnotation))
 		}
 
-		tests.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
+		config.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
 
 		By("Ensure ksm is disabled and annotation is set to false in the expected nodes")
 		for _, node := range nodesToEnableKSM {

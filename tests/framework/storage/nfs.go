@@ -6,19 +6,19 @@ import (
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
 
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/libpod"
 	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
-func InitNFS(targetImage, nodeName string) *k8sv1.Pod {
+func InitNFS(targetImage, nodeName string) (*k8sv1.Pod, error) {
 	nfsPod := renderNFSServer("nfsserver", targetImage)
 	nfsPod.Spec.NodeName = nodeName
-	return tests.RunPodInNamespace(nfsPod, testsuite.NamespacePrivileged)
+	return libpod.Run(nfsPod, testsuite.NamespacePrivileged)
 }
 
 func renderNFSServer(generateName string, hostPath string) *k8sv1.Pod {
@@ -55,7 +55,7 @@ func renderNFSServer(generateName string, hostPath string) *k8sv1.Pod {
 					ImagePullPolicy: k8sv1.PullIfNotPresent,
 					Resources:       resources,
 					SecurityContext: &k8sv1.SecurityContext{
-						Privileged: pointer.BoolPtr(true),
+						Privileged: pointer.P(true),
 					},
 					VolumeMounts: []k8sv1.VolumeMount{
 						{

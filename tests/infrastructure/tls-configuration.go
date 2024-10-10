@@ -25,26 +25,23 @@ import (
 	"fmt"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-
-	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
-
-	"kubevirt.io/kubevirt/tests/framework/checks"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"kubevirt.io/kubevirt/tests/util"
-
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests"
+	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/framework/checks"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
+	"kubevirt.io/kubevirt/tests/libpod"
 )
 
 var _ = DescribeInfra("tls configuration", func() {
@@ -64,13 +61,13 @@ var _ = DescribeInfra("tls configuration", func() {
 			Skip(fmt.Sprintf("Cluster has the %s featuregate disabled, skipping  the tests", virtconfig.VMExportGate))
 		}
 
-		kvConfig := util.GetCurrentKv(virtClient).Spec.Configuration.DeepCopy()
+		kvConfig := libkubevirt.GetCurrentKv(virtClient).Spec.Configuration.DeepCopy()
 		kvConfig.TLSConfiguration = &v1.TLSConfiguration{
 			MinTLSVersion: v1.VersionTLS12,
 			Ciphers:       []string{cipher.Name},
 		}
-		tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
-		newKv := util.GetCurrentKv(virtClient)
+		config.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+		newKv := libkubevirt.GetCurrentKv(virtClient)
 		Expect(newKv.Spec.Configuration.TLSConfiguration.MinTLSVersion).To(BeEquivalentTo(v1.VersionTLS12))
 		Expect(newKv.Spec.Configuration.TLSConfiguration.Ciphers).To(BeEquivalentTo([]string{cipher.Name}))
 
@@ -92,7 +89,7 @@ var _ = DescribeInfra("tls configuration", func() {
 			func(i int, pod k8sv1.Pod) {
 				stopChan := make(chan struct{})
 				defer close(stopChan)
-				Expect(tests.ForwardPorts(&pod, []string{fmt.Sprintf("844%d:%d", i, 8443)}, stopChan, 10*time.Second)).To(Succeed())
+				Expect(libpod.ForwardPorts(&pod, []string{fmt.Sprintf("844%d:%d", i, 8443)}, stopChan, 10*time.Second)).To(Succeed())
 
 				acceptedTLSConfig := &tls.Config{
 					InsecureSkipVerify: true,

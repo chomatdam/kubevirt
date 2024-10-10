@@ -28,29 +28,162 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
+	apiinstancetype "kubevirt.io/api/instancetype"
+	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
+
+	"kubevirt.io/kubevirt/pkg/instancetype"
+	"kubevirt.io/kubevirt/pkg/liveupdate/memory"
+	"kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
-func SetDefaultVirtualMachine(clusterConfig *virtconfig.ClusterConfig, vm *v1.VirtualMachine) error {
-	if err := setDefaultVirtualMachineInstanceSpec(clusterConfig, &vm.Spec.Template.Spec); err != nil {
-		return err
+func SetVirtualMachineDefaults(vm *v1.VirtualMachine, clusterConfig *virtconfig.ClusterConfig, instancetypeMethods instancetype.Methods) {
+	setDefaultInstancetypeKind(vm)
+	setDefaultPreferenceKind(vm)
+	setDefaultArchitecture(clusterConfig, &vm.Spec.Template.Spec)
+	preferenceSpec := getPreferenceSpec(vm, instancetypeMethods)
+	setVMDefaultMachineType(vm, preferenceSpec, clusterConfig)
+	setPreferenceStorageClassName(vm, preferenceSpec)
+}
+
+func getPreferenceSpec(vm *v1.VirtualMachine, instancetypeMethods instancetype.Methods) *instancetypev1beta1.VirtualMachinePreferenceSpec {
+	if vm.Spec.Preference == nil {
+		return nil
 	}
-	v1.SetObjectDefaults_VirtualMachine(vm)
-	setDefaultHypervFeatureDependencies(&vm.Spec.Template.Spec)
-	setDefaultCPUArch(clusterConfig, &vm.Spec.Template.Spec)
-	return nil
+
+	preferenceSpec, _ := instancetypeMethods.FindPreferenceSpec(vm)
+	return preferenceSpec
+}
+
+func setVMDefaultMachineType(vm *v1.VirtualMachine, preferenceSpec *instancetypev1beta1.VirtualMachinePreferenceSpec, clusterConfig *virtconfig.ClusterConfig) {
+	// Nothing to do, let's the validating webhook fail later
+	if vm.Spec.Template == nil {
+		return
+	}
+
+	if machine := vm.Spec.Template.Spec.Domain.Machine; machine != nil && machine.Type != "" {
+		return
+	}
+
+	if vm.Spec.Template.Spec.Domain.Machine == nil {
+		vm.Spec.Template.Spec.Domain.Machine = &v1.Machine{}
+	}
+
+	if preferenceSpec != nil && preferenceSpec.Machine != nil {
+		vm.Spec.Template.Spec.Domain.Machine.Type = preferenceSpec.Machine.PreferredMachineType
+	}
+
+	// Only use the cluster default if the user hasn't provided a machine type or referenced a preference with PreferredMachineType
+	if vm.Spec.Template.Spec.Domain.Machine.Type == "" {
+		vm.Spec.Template.Spec.Domain.Machine.Type = clusterConfig.GetMachineType(vm.Spec.Template.Spec.Architecture)
+	}
+}
+
+func setPreferenceStorageClassName(vm *v1.VirtualMachine, preferenceSpec *instancetypev1beta1.VirtualMachinePreferenceSpec) {
+	// Nothing to do, let's the validating webhook fail later
+	if vm.Spec.Template == nil {
+		return
+	}
+
+	if preferenceSpec != nil && preferenceSpec.Volumes != nil && preferenceSpec.Volumes.PreferredStorageClassName != "" {
+		for _, dv := range vm.Spec.DataVolumeTemplates {
+			if dv.Spec.PVC != nil && dv.Spec.PVC.StorageClassName == nil {
+				dv.Spec.PVC.StorageClassName = &preferenceSpec.Volumes.PreferredStorageClassName
+			}
+			if dv.Spec.Storage != nil && dv.Spec.Storage.StorageClassName == nil {
+				dv.Spec.Storage.StorageClassName = &preferenceSpec.Volumes.PreferredStorageClassName
+			}
+		}
+	}
+}
+
+func setDefaultInstancetypeKind(vm *v1.VirtualMachine) {
+	if vm.Spec.Instancetype == nil {
+		return
+	}
+
+	if vm.Spec.Instancetype.Kind == "" {
+		vm.Spec.Instancetype.Kind = apiinstancetype.ClusterSingularResourceName
+	}
+}
+
+func setDefaultPreferenceKind(vm *v1.VirtualMachine) {
+	if vm.Spec.Preference == nil {
+		return
+	}
+
+	if vm.Spec.Preference.Kind == "" {
+		vm.Spec.Preference.Kind = apiinstancetype.ClusterSingularPreferenceResourceName
+	}
 }
 
 func SetDefaultVirtualMachineInstance(clusterConfig *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstance) error {
-	if err := setDefaultVirtualMachineInstanceSpec(clusterConfig, &vmi.Spec); err != nil {
+	if err := SetDefaultVirtualMachineInstanceSpec(clusterConfig, &vmi.Spec); err != nil {
 		return err
 	}
+	setDefaultFeatures(&vmi.Spec)
 	v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 	setDefaultHypervFeatureDependencies(&vmi.Spec)
 	setDefaultCPUArch(clusterConfig, &vmi.Spec)
 	setGuestMemoryStatus(vmi)
+	setCurrentCPUTopologyStatus(vmi)
+	setupHotplug(clusterConfig, vmi)
 	return nil
+}
+
+func setupHotplug(clusterConfig *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstance) {
+	if !clusterConfig.IsVMRolloutStrategyLiveUpdate() {
+		return
+	}
+	setupCPUHotplug(clusterConfig, vmi)
+	setupMemoryHotplug(clusterConfig, vmi)
+}
+
+func setupCPUHotplug(clusterConfig *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstance) {
+	if vmi.Spec.Domain.CPU.MaxSockets == 0 {
+		maxSockets := clusterConfig.GetMaximumCpuSockets()
+		if vmi.Spec.Domain.CPU.Sockets > maxSockets && maxSockets != 0 {
+			maxSockets = vmi.Spec.Domain.CPU.Sockets
+		}
+		vmi.Spec.Domain.CPU.MaxSockets = maxSockets
+	}
+
+	if vmi.Spec.Domain.CPU.MaxSockets == 0 {
+		vmi.Spec.Domain.CPU.MaxSockets = vmi.Spec.Domain.CPU.Sockets * clusterConfig.GetMaxHotplugRatio()
+	}
+}
+
+func setupMemoryHotplug(clusterConfig *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstance) {
+	if vmi.Spec.Domain.Memory.MaxGuest != nil {
+		return
+	}
+
+	var maxGuest *resource.Quantity
+	switch {
+	case clusterConfig.GetMaximumGuestMemory() != nil:
+		maxGuest = clusterConfig.GetMaximumGuestMemory()
+	case vmi.Spec.Domain.Memory.Guest != nil:
+		maxGuest = resource.NewQuantity(vmi.Spec.Domain.Memory.Guest.Value()*int64(clusterConfig.GetMaxHotplugRatio()), resource.BinarySI)
+	}
+
+	if err := memory.ValidateLiveUpdateMemory(&vmi.Spec, maxGuest); err != nil {
+		// memory hotplug is not compatible with this VM configuration
+		log.Log.V(2).Object(vmi).Infof("memory-hotplug disabled: %s", err)
+		return
+	}
+
+	vmi.Spec.Domain.Memory.MaxGuest = maxGuest
+}
+
+func setCurrentCPUTopologyStatus(vmi *v1.VirtualMachineInstance) {
+	if vmi.Spec.Domain.CPU != nil && vmi.Status.CurrentCPUTopology == nil {
+		vmi.Status.CurrentCPUTopology = &v1.CPUTopology{
+			Sockets: vmi.Spec.Domain.CPU.Sockets,
+			Cores:   vmi.Spec.Domain.CPU.Cores,
+			Threads: vmi.Spec.Domain.CPU.Threads,
+		}
+	}
 }
 
 func setGuestMemoryStatus(vmi *v1.VirtualMachineInstance) {
@@ -64,15 +197,25 @@ func setGuestMemoryStatus(vmi *v1.VirtualMachineInstance) {
 	}
 }
 
+func setDefaultFeatures(spec *v1.VirtualMachineInstanceSpec) {
+	if IsS390X(spec) {
+		setS390xDefaultFeatures(spec)
+	}
+}
+
 func setDefaultCPUArch(clusterConfig *virtconfig.ClusterConfig, spec *v1.VirtualMachineInstanceSpec) {
 	// Do some CPU arch specific setting.
-	if IsARM64(spec) {
+	switch {
+	case IsARM64(spec):
 		log.Log.V(4).Info("Apply Arm64 specific setting")
 		SetArm64Defaults(spec)
-	} else {
+	case IsS390X(spec):
+		log.Log.V(4).Info("Apply s390x specific setting")
+		SetS390xDefaults(spec)
+	default:
 		SetAmd64Defaults(spec)
-		setDefaultCPUModel(clusterConfig, spec)
 	}
+	setDefaultCPUModel(clusterConfig, spec)
 }
 
 func setDefaultHypervFeatureDependencies(spec *v1.VirtualMachineInstanceSpec) {
@@ -89,14 +232,15 @@ func setDefaultHypervFeatureDependencies(spec *v1.VirtualMachineInstanceSpec) {
 	}
 }
 
-func setDefaultVirtualMachineInstanceSpec(clusterConfig *virtconfig.ClusterConfig, spec *v1.VirtualMachineInstanceSpec) error {
+func SetDefaultVirtualMachineInstanceSpec(clusterConfig *virtconfig.ClusterConfig, spec *v1.VirtualMachineInstanceSpec) error {
 	setDefaultArchitecture(clusterConfig, spec)
 	setDefaultMachineType(clusterConfig, spec)
 	setDefaultResourceRequests(clusterConfig, spec)
+	setGuestMemory(spec)
 	SetDefaultGuestCPUTopology(clusterConfig, spec)
-	setDefaultPullPoliciesOnContainerDisks(clusterConfig, spec)
+	setDefaultPullPoliciesOnContainerDisks(spec)
 	setDefaultEvictionStrategy(clusterConfig, spec)
-	if err := clusterConfig.SetVMISpecDefaultNetworkInterface(spec); err != nil {
+	if err := vmispec.SetDefaultNetworkInterface(clusterConfig, spec); err != nil {
 		return err
 	}
 	util.SetDefaultVolumeDisk(spec)
@@ -122,7 +266,7 @@ func setDefaultMachineType(clusterConfig *virtconfig.ClusterConfig, spec *v1.Vir
 
 }
 
-func setDefaultPullPoliciesOnContainerDisks(clusterConfig *virtconfig.ClusterConfig, spec *v1.VirtualMachineInstanceSpec) {
+func setDefaultPullPoliciesOnContainerDisks(spec *v1.VirtualMachineInstanceSpec) {
 	for _, volume := range spec.Volumes {
 		if volume.ContainerDisk != nil && volume.ContainerDisk.ImagePullPolicy == "" {
 			if strings.HasSuffix(volume.ContainerDisk.Image, ":latest") || !strings.ContainsAny(volume.ContainerDisk.Image, ":@") {
@@ -132,6 +276,29 @@ func setDefaultPullPoliciesOnContainerDisks(clusterConfig *virtconfig.ClusterCon
 			}
 		}
 	}
+}
+
+func setGuestMemory(spec *v1.VirtualMachineInstanceSpec) {
+	if spec.Domain.Memory != nil &&
+		spec.Domain.Memory.Guest != nil {
+		return
+	}
+
+	if spec.Domain.Memory == nil {
+		spec.Domain.Memory = &v1.Memory{}
+	}
+
+	switch {
+	case !spec.Domain.Resources.Requests.Memory().IsZero():
+		spec.Domain.Memory.Guest = spec.Domain.Resources.Requests.Memory()
+	case !spec.Domain.Resources.Limits.Memory().IsZero():
+		spec.Domain.Memory.Guest = spec.Domain.Resources.Limits.Memory()
+	case spec.Domain.Memory.Hugepages != nil:
+		if hugepagesSize, err := resource.ParseQuantity(spec.Domain.Memory.Hugepages.PageSize); err == nil {
+			spec.Domain.Memory.Guest = &hugepagesSize
+		}
+	}
+
 }
 
 func setDefaultResourceRequests(clusterConfig *virtconfig.ClusterConfig, spec *v1.VirtualMachineInstanceSpec) {
@@ -161,6 +328,7 @@ func setDefaultResourceRequests(clusterConfig *virtconfig.ClusterConfig, spec *v
 				memory = &hugepagesSize
 			}
 		}
+
 		if memory != nil && memory.Value() > 0 {
 			if resources.Requests == nil {
 				resources.Requests = k8sv1.ResourceList{}
@@ -176,6 +344,7 @@ func setDefaultResourceRequests(clusterConfig *virtconfig.ClusterConfig, spec *v
 			log.Log.V(4).Infof("Set memory-request to %s as a result of memory-overcommit = %v%%", memoryRequest.String(), overcommit)
 		}
 	}
+
 	if cpuRequest := clusterConfig.GetCPURequest(); !cpuRequest.Equal(resource.MustParse(virtconfig.DefaultCPURequest)) {
 		if _, exists := resources.Requests[k8sv1.ResourceCPU]; !exists {
 			if spec.Domain.CPU != nil && spec.Domain.CPU.DedicatedCPUPlacement {

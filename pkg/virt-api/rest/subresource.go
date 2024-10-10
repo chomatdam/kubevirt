@@ -41,9 +41,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/yaml"
-	"k8s.io/utils/pointer"
-
-	"kubevirt.io/kubevirt/pkg/util/status"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
@@ -54,29 +51,31 @@ import (
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/instancetype"
+	"kubevirt.io/kubevirt/pkg/pointer"
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	kutil "kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
 const (
-	unmarshalRequestErrFmt       = "Can not unmarshal Request body to struct, error: %s"
-	vmNotRunning                 = "VM is not running"
-	patchingVMFmt                = "Patching VM: %s"
-	jsonpatchTestErr             = "jsonpatch test operation does not apply"
-	patchingVMStatusFmt          = "Patching VM status: %s"
-	vmiNotRunning                = "VMI is not running"
-	vmiNotPaused                 = "VMI is not paused"
-	vmiGuestAgentErr             = "VMI does not have guest agent connected"
-	vmiNoAttestationErr          = "Attestation not requested for VMI"
-	prepConnectionErrFmt         = "Cannot prepare connection %s"
-	getRequestErrFmt             = "Cannot GET request %s"
-	pvcVolumeModeErr             = "pvc should be filesystem pvc"
-	pvcAccessModeErr             = "pvc access mode can't be read only"
-	pvcSizeErrFmt                = "pvc size [%s] should be bigger then [%s]"
-	memoryDumpNameConflictErr    = "can't request memory dump for pvc [%s] while pvc [%s] is still associated as the memory dump pvc"
-	featureGateDisabledErrFmt    = "'%s' feature gate is not enabled"
-	defaultProfilerComponentPort = 8443
+	unmarshalRequestErrFmt                   = "Can not unmarshal Request body to struct, error: %s"
+	vmNotRunning                             = "VM is not running"
+	patchingVMFmt                            = "Patching VM: %s"
+	jsonpatchTestErr                         = "jsonpatch test operation does not apply"
+	patchingVMStatusFmt                      = "Patching VM status: %s"
+	vmiNotRunning                            = "VMI is not running"
+	vmiNotPaused                             = "VMI is not paused"
+	vmiGuestAgentErr                         = "VMI does not have guest agent connected"
+	vmiNoAttestationErr                      = "Attestation not requested for VMI"
+	prepConnectionErrFmt                     = "Cannot prepare connection %s"
+	getRequestErrFmt                         = "Cannot GET request %s"
+	pvcVolumeModeErr                         = "pvc should be filesystem pvc"
+	pvcAccessModeErr                         = "pvc access mode can't be read only"
+	pvcSizeErrFmt                            = "pvc size [%s] should be bigger then [%s]"
+	memoryDumpNameConflictErr                = "can't request memory dump for pvc [%s] while pvc [%s] is still associated as the memory dump pvc"
+	featureGateDisabledErrFmt                = "'%s' feature gate is not enabled"
+	defaultProfilerComponentPort             = 8443
+	volumeMigrationManualRecoveryRequiredErr = "VM recovery required: Volume migration failed, leaving some volumes pointing to non-consistent targets; manual intervention is needed to reassign them to their original volumes."
 )
 
 type SubresourceAPIApp struct {
@@ -85,7 +84,6 @@ type SubresourceAPIApp struct {
 	profilerComponentPort   int
 	handlerTLSConfiguration *tls.Config
 	credentialsLock         *sync.Mutex
-	statusUpdater           *status.VMStatusUpdater
 	clusterConfig           *virtconfig.ClusterConfig
 	instancetypeMethods     instancetype.Methods
 	handlerHttpClient       *http.Client
@@ -112,7 +110,6 @@ func NewSubresourceAPIApp(virtCli kubecli.KubevirtClient, consoleServerPort int,
 		profilerComponentPort:   defaultProfilerComponentPort,
 		credentialsLock:         &sync.Mutex{},
 		handlerTLSConfiguration: tlsConfiguration,
-		statusUpdater:           status.NewVMStatusUpdater(virtCli),
 		clusterConfig:           clusterConfig,
 		instancetypeMethods:     instancetypeMethods,
 		handlerHttpClient:       httpClient,
@@ -211,61 +208,31 @@ func (app *SubresourceAPIApp) getVirtHandlerConnForVMI(vmi *v1.VirtualMachineIns
 	return kubecli.NewVirtHandlerClient(app.virtCli, app.handlerHttpClient).Port(app.consoleServerPort).ForNode(vmi.Status.NodeName), nil
 }
 
-func getChangeRequestJson(vm *v1.VirtualMachine, changes ...v1.VirtualMachineStateChangeRequest) (string, error) {
-
-	var ops []string
-
-	verb := "add"
+func getChangeRequestJson(vm *v1.VirtualMachine, changes ...v1.VirtualMachineStateChangeRequest) ([]byte, error) {
+	patchSet := patch.New()
 	// Special case: if there's no status field at all, add one.
 	newStatus := v1.VirtualMachineStatus{}
 	if equality.Semantic.DeepEqual(vm.Status, newStatus) {
 		newStatus.StateChangeRequests = append(newStatus.StateChangeRequests, changes...)
-		statusJson, err := json.Marshal(newStatus)
-		if err != nil {
-			return "", err
-		}
-		ops = append(ops, fmt.Sprintf(`{ "op": "%s", "path": "/status", "value": %s}`, verb, string(statusJson)))
+		patchSet.AddOption(patch.WithAdd("/status", newStatus))
 	} else {
-
-		failOnConflict := true
-		if len(changes) == 1 && changes[0].Action == v1.StopRequest {
+		patchSet.AddOption(patch.WithTest("/status/stateChangeRequests", vm.Status.StateChangeRequests))
+		switch {
+		case len(vm.Status.StateChangeRequests) == 0:
+			patchSet.AddOption(patch.WithAdd("/status/stateChangeRequests", changes))
+		case len(changes) == 1 && changes[0].Action == v1.StopRequest:
 			// If this is a stopRequest, replace all existing StateChangeRequests.
-			failOnConflict = false
+			patchSet.AddOption(patch.WithReplace("/status/stateChangeRequests", changes))
+		default:
+			return nil, fmt.Errorf("unable to complete request: stop/start already underway")
 		}
-
-		if len(vm.Status.StateChangeRequests) != 0 {
-			if failOnConflict {
-				return "", fmt.Errorf("unable to complete request: stop/start already underway")
-			} else {
-				verb = "replace"
-			}
-		}
-
-		changeRequests := []v1.VirtualMachineStateChangeRequest{}
-		changeRequests = append(changeRequests, changes...)
-
-		oldChangeRequestsJson, err := json.Marshal(vm.Status.StateChangeRequests)
-		if err != nil {
-			return "", err
-		}
-
-		newChangeRequestsJson, err := json.Marshal(changeRequests)
-		if err != nil {
-			return "", err
-		}
-
-		test := fmt.Sprintf(`{ "op": "test", "path": "/status/stateChangeRequests", "value": %s}`, string(oldChangeRequestsJson))
-		update := fmt.Sprintf(`{ "op": "%s", "path": "/status/stateChangeRequests", "value": %s}`, verb, string(newChangeRequestsJson))
-
-		ops = append(ops, test)
-		ops = append(ops, update)
 	}
 
 	if vm.Status.StartFailure != nil {
-		ops = append(ops, `{ "op": "remove", "path": "/status/startFailure" }`)
+		patchSet.AddOption(patch.WithRemove("/status/startFailure"))
 	}
 
-	return string(controller.GeneratePatchBytes(ops)), nil
+	return patchSet.GeneratePayload()
 }
 
 func getRunningJson(vm *v1.VirtualMachine, running bool) string {
@@ -285,14 +252,15 @@ func getUpdateTerminatingSecondsGracePeriod(gracePeriod int64) string {
 }
 
 func (app *SubresourceAPIApp) patchVMStatusStopped(vmi *v1.VirtualMachineInstance, vm *v1.VirtualMachine, response *restful.Response, bodyStruct *v1.StopOptions) (error, error) {
-	bodyString, err := getChangeRequestJson(vm,
+	patchBytes, err := getChangeRequestJson(vm,
 		v1.VirtualMachineStateChangeRequest{Action: v1.StopRequest, UID: &vmi.UID})
 	if err != nil {
 		writeError(errors.NewInternalError(err), response)
 		return nil, err
 	}
-	log.Log.Object(vm).V(4).Infof(patchingVMStatusFmt, bodyString)
-	return app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun}), nil
+	log.Log.Object(vm).V(4).Infof(patchingVMStatusFmt, string(patchBytes))
+	_, err = app.virtCli.VirtualMachine(vm.Namespace).PatchStatus(context.Background(), vm.Name, types.JSONPatchType, patchBytes, k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
+	return err, nil
 }
 
 func (app *SubresourceAPIApp) MigrateVMRequestHandler(request *restful.Request, response *restful.Response) {
@@ -328,14 +296,14 @@ func (app *SubresourceAPIApp) MigrateVMRequestHandler(request *restful.Request, 
 	}
 
 	createMigrationJob := func() *errors.StatusError {
-		_, err := app.virtCli.VirtualMachineInstanceMigration(namespace).Create(&v1.VirtualMachineInstanceMigration{
+		_, err := app.virtCli.VirtualMachineInstanceMigration(namespace).Create(context.Background(), &v1.VirtualMachineInstanceMigration{
 			ObjectMeta: k8smetav1.ObjectMeta{
 				GenerateName: "kubevirt-migrate-vm-",
 			},
 			Spec: v1.VirtualMachineInstanceMigrationSpec{
 				VMIName: name,
 			},
-		}, &k8smetav1.CreateOptions{DryRun: bodyStruct.DryRun})
+		}, k8smetav1.CreateOptions{DryRun: bodyStruct.DryRun})
 		if err != nil {
 			return errors.NewInternalError(err)
 		}
@@ -386,6 +354,11 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 		writeError(statusErr, response)
 		return
 	}
+	if controller.NewVirtualMachineConditionManager().HasConditionWithStatus(vm,
+		v1.VirtualMachineConditionType(v1.VirtualMachineInstanceVolumesChange), v12.ConditionTrue) {
+		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf(volumeMigrationManualRecoveryRequiredErr)), response)
+		return
+	}
 
 	runStrategy, err := vm.RunStrategy()
 	if err != nil {
@@ -397,7 +370,7 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 		return
 	}
 
-	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, &k8smetav1.GetOptions{})
+	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			writeError(errors.NewInternalError(err), response)
@@ -407,7 +380,7 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 		return
 	}
 
-	bodyString, err := getChangeRequestJson(vm,
+	patchBytes, err := getChangeRequestJson(vm,
 		v1.VirtualMachineStateChangeRequest{Action: v1.StopRequest, UID: &vmi.UID},
 		v1.VirtualMachineStateChangeRequest{Action: v1.StartRequest})
 	if err != nil {
@@ -415,8 +388,8 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 		return
 	}
 
-	log.Log.Object(vm).V(4).Infof(patchingVMFmt, bodyString)
-	err = app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
+	log.Log.Object(vm).V(4).Infof(patchingVMFmt, string(patchBytes))
+	_, err = app.virtCli.VirtualMachine(vm.Namespace).PatchStatus(context.Background(), vm.Name, types.JSONPatchType, patchBytes, k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 	if err != nil {
 		if strings.Contains(err.Error(), jsonpatchTestErr) {
 			writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, err), response)
@@ -440,7 +413,7 @@ func (app *SubresourceAPIApp) RestartVMRequestHandler(request *restful.Request, 
 				return
 			}
 			// set terminationGracePeriod to 1 (which is the shorted safe restart period) and delete the VMI pod to trigger a swift restart.
-			err = app.virtCli.CoreV1().Pods(namespace).Delete(context.Background(), vmiPodname, k8smetav1.DeleteOptions{GracePeriodSeconds: pointer.Int64(1)})
+			err = app.virtCli.CoreV1().Pods(namespace).Delete(context.Background(), vmiPodname, k8smetav1.DeleteOptions{GracePeriodSeconds: pointer.P(int64(1))})
 			if err != nil {
 				if !errors.IsNotFound(err) {
 					writeError(errors.NewInternalError(err), response)
@@ -494,7 +467,7 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 		return
 	}
 
-	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, &k8smetav1.GetOptions{})
+	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			writeError(errors.NewInternalError(err), response)
@@ -503,6 +476,11 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 	}
 	if vmi != nil && !vmi.IsFinal() && vmi.Status.Phase != v1.Unknown && vmi.Status.Phase != v1.VmPhaseUnset {
 		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("VM is already running")), response)
+		return
+	}
+	if controller.NewVirtualMachineConditionManager().HasConditionWithStatus(vm,
+		v1.VirtualMachineConditionType(v1.VirtualMachineInstanceVolumesChange), v12.ConditionTrue) {
+		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf(volumeMigrationManualRecoveryRequiredErr)), response)
 		return
 	}
 
@@ -542,7 +520,7 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 		// Send start request if VM should start paused. virt-controller will update RunStrategy upon this request.
 		// No need to send the request if StartStrategy is already set to Paused in VMI Spec.
 		if startPaused && (vm.Spec.Template == nil || vm.Spec.Template.Spec.StartStrategy != &pausedStartStrategy) {
-			patchString, err := getChangeRequestJson(vm, v1.VirtualMachineStateChangeRequest{
+			patchBytes, err := getChangeRequestJson(vm, v1.VirtualMachineStateChangeRequest{
 				Action: v1.StartRequest,
 				Data:   startChangeRequestData,
 			})
@@ -550,12 +528,12 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 				writeError(errors.NewInternalError(err), response)
 				return
 			}
-			log.Log.Object(vm).V(4).Infof(patchingVMStatusFmt, patchString)
-			patchErr = app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(patchString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
+			log.Log.Object(vm).V(4).Infof(patchingVMStatusFmt, string(patchBytes))
+			_, patchErr = app.virtCli.VirtualMachine(vm.Namespace).PatchStatus(context.Background(), vm.Name, types.JSONPatchType, patchBytes, k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 		} else {
 			patchString := getRunningJson(vm, true)
 			log.Log.Object(vm).V(4).Infof(patchingVMFmt, patchString)
-			_, patchErr = app.virtCli.VirtualMachine(namespace).Patch(context.Background(), vm.GetName(), types.MergePatchType, []byte(patchString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
+			_, patchErr = app.virtCli.VirtualMachine(namespace).Patch(context.Background(), vm.GetName(), types.MergePatchType, []byte(patchString), k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 		}
 
 	case v1.RunStrategyRerunOnFailure, v1.RunStrategyManual:
@@ -568,21 +546,21 @@ func (app *SubresourceAPIApp) StartVMRequestHandler(request *restful.Request, re
 			return
 		}
 
-		var bodyString string
+		var patchBytes []byte
 		if needsRestart {
-			bodyString, err = getChangeRequestJson(vm,
+			patchBytes, err = getChangeRequestJson(vm,
 				v1.VirtualMachineStateChangeRequest{Action: v1.StopRequest, UID: &vmi.UID},
 				v1.VirtualMachineStateChangeRequest{Action: v1.StartRequest, Data: startChangeRequestData})
 		} else {
-			bodyString, err = getChangeRequestJson(vm,
+			patchBytes, err = getChangeRequestJson(vm,
 				v1.VirtualMachineStateChangeRequest{Action: v1.StartRequest, Data: startChangeRequestData})
 		}
 		if err != nil {
 			writeError(errors.NewInternalError(err), response)
 			return
 		}
-		log.Log.Object(vm).V(4).Infof(patchingVMStatusFmt, bodyString)
-		patchErr = app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
+		log.Log.Object(vm).V(4).Infof(patchingVMStatusFmt, string(patchBytes))
+		_, patchErr = app.virtCli.VirtualMachine(vm.Namespace).PatchStatus(context.Background(), vm.Name, types.JSONPatchType, patchBytes, k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 	case v1.RunStrategyAlways, v1.RunStrategyOnce:
 		writeError(errors.NewConflict(v1.Resource("virtualmachine"), name, fmt.Errorf("%v does not support manual start requests", runStrategy)), response)
 		return
@@ -635,7 +613,7 @@ func (app *SubresourceAPIApp) StopVMRequestHandler(request *restful.Request, res
 	}
 
 	hasVMI := true
-	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, &k8smetav1.GetOptions{})
+	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 	if err != nil && errors.IsNotFound(err) {
 		hasVMI = false
 	} else if err != nil {
@@ -654,7 +632,7 @@ func (app *SubresourceAPIApp) StopVMRequestHandler(request *restful.Request, res
 
 		bodyString := getUpdateTerminatingSecondsGracePeriod(*bodyStruct.GracePeriod)
 		log.Log.Object(vmi).V(2).Infof("Patching VMI: %s", bodyString)
-		_, err = app.virtCli.VirtualMachineInstance(namespace).Patch(context.Background(), vmi.GetName(), patchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
+		_, err = app.virtCli.VirtualMachineInstance(namespace).Patch(context.Background(), vmi.GetName(), patchType, []byte(bodyString), k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 		if err != nil {
 			writeError(errors.NewInternalError(err), response)
 			return
@@ -690,7 +668,7 @@ func (app *SubresourceAPIApp) StopVMRequestHandler(request *restful.Request, res
 	case v1.RunStrategyAlways, v1.RunStrategyOnce:
 		bodyString := getRunningJson(vm, false)
 		log.Log.Object(vm).V(4).Infof(patchingVMFmt, bodyString)
-		_, patchErr = app.virtCli.VirtualMachine(namespace).Patch(context.Background(), vm.GetName(), patchType, []byte(bodyString), &k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
+		_, patchErr = app.virtCli.VirtualMachine(namespace).Patch(context.Background(), vm.GetName(), patchType, []byte(bodyString), k8smetav1.PatchOptions{DryRun: bodyStruct.DryRun})
 	}
 
 	if patchErr != nil {
@@ -837,7 +815,7 @@ func (app *SubresourceAPIApp) SoftRebootVMIRequestHandler(request *restful.Reque
 
 func (app *SubresourceAPIApp) fetchVirtualMachine(name string, namespace string) (*v1.VirtualMachine, *errors.StatusError) {
 
-	vm, err := app.virtCli.VirtualMachine(namespace).Get(context.Background(), name, &k8smetav1.GetOptions{})
+	vm, err := app.virtCli.VirtualMachine(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil, errors.NewNotFound(v1.Resource("virtualmachine"), name)
@@ -850,7 +828,7 @@ func (app *SubresourceAPIApp) fetchVirtualMachine(name string, namespace string)
 // FetchVirtualMachineInstance by namespace and name
 func (app *SubresourceAPIApp) FetchVirtualMachineInstance(namespace, name string) (*v1.VirtualMachineInstance, *errors.StatusError) {
 
-	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, &k8smetav1.GetOptions{})
+	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil, errors.NewNotFound(v1.Resource("virtualmachineinstance"), name)
@@ -862,7 +840,7 @@ func (app *SubresourceAPIApp) FetchVirtualMachineInstance(namespace, name string
 
 // FetchVirtualMachineInstanceForVM by namespace and name
 func (app *SubresourceAPIApp) FetchVirtualMachineInstanceForVM(namespace, name string) (*v1.VirtualMachineInstance, *errors.StatusError) {
-	vm, err := app.virtCli.VirtualMachine(namespace).Get(context.Background(), name, &k8smetav1.GetOptions{})
+	vm, err := app.virtCli.VirtualMachine(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil, errors.NewNotFound(v1.Resource("virtualmachine"), name)
@@ -874,7 +852,7 @@ func (app *SubresourceAPIApp) FetchVirtualMachineInstanceForVM(namespace, name s
 		return nil, errors.NewConflict(v1.Resource("virtualmachine"), vm.Name, fmt.Errorf("VMI is not started"))
 	}
 
-	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, &k8smetav1.GetOptions{})
+	vmi, err := app.virtCli.VirtualMachineInstance(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil, errors.NewNotFound(v1.Resource("virtualmachineinstance"), name)
@@ -958,7 +936,7 @@ func (app *SubresourceAPIApp) FilesystemList(request *restful.Request, response 
 	app.httpGetRequestHandler(request, response, validate, getURL, v1.VirtualMachineInstanceFileSystemList{})
 }
 
-func generateVMVolumeRequestPatch(vm *v1.VirtualMachine, volumeRequest *v1.VirtualMachineVolumeRequest) (string, error) {
+func generateVMVolumeRequestPatch(vm *v1.VirtualMachine, volumeRequest *v1.VirtualMachineVolumeRequest) ([]byte, error) {
 	vmCopy := vm.DeepCopy()
 
 	// We only validate the list against other items in the list at this point.
@@ -966,36 +944,24 @@ func generateVMVolumeRequestPatch(vm *v1.VirtualMachine, volumeRequest *v1.Virtu
 	// during the Patch command
 	if volumeRequest.AddVolumeOptions != nil {
 		if err := addAddVolumeRequests(vm, volumeRequest, vmCopy); err != nil {
-			return "", err
+			return nil, err
 		}
 	} else if volumeRequest.RemoveVolumeOptions != nil {
 		if err := addRemoveVolumeRequests(vm, volumeRequest, vmCopy); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 
-	patchBytes, err := patch.GeneratePatchPayload(
-		patch.PatchOperation{
-			Op:    patch.PatchTestOp,
-			Path:  "/status/volumeRequests",
-			Value: vm.Status.VolumeRequests,
-		},
-		patch.PatchOperation{
-			Op:    getPatchVerb(vm.Status.VolumeRequests),
-			Path:  "/status/volumeRequests",
-			Value: vmCopy.Status.VolumeRequests,
-		},
+	patchSet := patch.New(
+		patch.WithTest("/status/volumeRequests", vm.Status.VolumeRequests),
 	)
 
-	return string(patchBytes), err
-}
-
-func getPatchVerb(requests []v1.VirtualMachineVolumeRequest) string {
-	verb := "add"
-	if len(requests) > 0 {
-		verb = "replace"
+	if len(vm.Status.VolumeRequests) > 0 {
+		patchSet.AddOption(patch.WithReplace("/status/volumeRequests", vmCopy.Status.VolumeRequests))
+	} else {
+		patchSet.AddOption(patch.WithAdd("/status/volumeRequests", vmCopy.Status.VolumeRequests))
 	}
-	return verb
+	return patchSet.GeneratePayload()
 }
 
 func addAddVolumeRequests(vm *v1.VirtualMachine, volumeRequest *v1.VirtualMachineVolumeRequest, vmCopy *v1.VirtualMachine) error {
@@ -1099,51 +1065,28 @@ func verifyVolumeOption(volumes []v1.Volume, volumeRequest *v1.VirtualMachineVol
 	return nil
 }
 
-func generateVMIVolumeRequestPatch(vmi *v1.VirtualMachineInstance, volumeRequest *v1.VirtualMachineVolumeRequest) (string, error) {
-
-	volumeVerb := "add"
-	diskVerb := "add"
-
-	if len(vmi.Spec.Volumes) > 0 {
-		volumeVerb = "replace"
-	}
-
-	if len(vmi.Spec.Domain.Devices.Disks) > 0 {
-		diskVerb = "replace"
-	}
-
+func generateVMIVolumeRequestPatch(vmi *v1.VirtualMachineInstance, volumeRequest *v1.VirtualMachineVolumeRequest) ([]byte, error) {
 	vmiCopy := vmi.DeepCopy()
 	vmiCopy.Spec = *controller.ApplyVolumeRequestOnVMISpec(&vmiCopy.Spec, volumeRequest)
 
-	oldVolumesJson, err := json.Marshal(vmi.Spec.Volumes)
-	if err != nil {
-		return "", err
+	patchSet := patch.New(
+		patch.WithTest("/spec/volumes", vmi.Spec.Volumes),
+		patch.WithTest("/spec/domain/devices/disks", vmi.Spec.Domain.Devices.Disks),
+	)
+
+	if len(vmi.Spec.Volumes) > 0 {
+		patchSet.AddOption(patch.WithReplace("/spec/volumes", vmiCopy.Spec.Volumes))
+	} else {
+		patchSet.AddOption(patch.WithAdd("/spec/volumes", vmiCopy.Spec.Volumes))
 	}
 
-	newVolumesJson, err := json.Marshal(vmiCopy.Spec.Volumes)
-	if err != nil {
-		return "", err
+	if len(vmi.Spec.Domain.Devices.Disks) > 0 {
+		patchSet.AddOption(patch.WithReplace("/spec/domain/devices/disks", vmiCopy.Spec.Domain.Devices.Disks))
+	} else {
+		patchSet.AddOption(patch.WithAdd("/spec/domain/devices/disks", vmiCopy.Spec.Domain.Devices.Disks))
 	}
 
-	oldDisksJson, err := json.Marshal(vmi.Spec.Domain.Devices.Disks)
-	if err != nil {
-		return "", err
-	}
-
-	newDisksJson, err := json.Marshal(vmiCopy.Spec.Domain.Devices.Disks)
-	if err != nil {
-		return "", err
-	}
-
-	testVolumes := fmt.Sprintf(`{ "op": "test", "path": "/spec/volumes", "value": %s}`, string(oldVolumesJson))
-	updateVolumes := fmt.Sprintf(`{ "op": "%s", "path": "/spec/volumes", "value": %s}`, volumeVerb, string(newVolumesJson))
-
-	testDisks := fmt.Sprintf(`{ "op": "test", "path": "/spec/domain/devices/disks", "value": %s}`, string(oldDisksJson))
-	updateDisks := fmt.Sprintf(`{ "op": "%s", "path": "/spec/domain/devices/disks", "value": %s}`, diskVerb, string(newDisksJson))
-
-	patch := fmt.Sprintf("[%s, %s, %s, %s]", testVolumes, testDisks, updateVolumes, updateDisks)
-
-	return patch, nil
+	return patchSet.GeneratePayload()
 }
 
 func (app *SubresourceAPIApp) addVolumeRequestHandler(request *restful.Request, response *restful.Response, ephemeral bool) {
@@ -1274,14 +1217,14 @@ func (app *SubresourceAPIApp) vmiVolumePatch(name, namespace string, volumeReque
 		return errors.NewConflict(v1.Resource("virtualmachineinstance"), name, err)
 	}
 
-	patch, err := generateVMIVolumeRequestPatch(vmi, volumeRequest)
+	patchBytes, err := generateVMIVolumeRequestPatch(vmi, volumeRequest)
 	if err != nil {
 		return errors.NewConflict(v1.Resource("virtualmachineinstance"), name, err)
 	}
 
 	dryRunOption := app.getDryRunOption(volumeRequest)
-	log.Log.Object(vmi).V(4).Infof("Patching VMI: %s", patch)
-	if _, err := app.virtCli.VirtualMachineInstance(vmi.Namespace).Patch(context.Background(), vmi.Name, types.JSONPatchType, []byte(patch), &k8smetav1.PatchOptions{DryRun: dryRunOption}); err != nil {
+	log.Log.Object(vmi).V(4).Infof("Patching VMI: %s", string(patchBytes))
+	if _, err := app.virtCli.VirtualMachineInstance(vmi.Namespace).Patch(context.Background(), vmi.Name, types.JSONPatchType, patchBytes, k8smetav1.PatchOptions{DryRun: dryRunOption}); err != nil {
 		log.Log.Object(vmi).Errorf("unable to patch vmi: %v", err)
 		if errors.IsInvalid(err) {
 			if statErr, ok := err.(*errors.StatusError); ok {
@@ -1304,14 +1247,14 @@ func (app *SubresourceAPIApp) vmVolumePatchStatus(name, namespace string, volume
 		return errors.NewConflict(v1.Resource("virtualmachine"), name, err)
 	}
 
-	patch, err := generateVMVolumeRequestPatch(vm, volumeRequest)
+	patchBytes, err := generateVMVolumeRequestPatch(vm, volumeRequest)
 	if err != nil {
 		return errors.NewConflict(v1.Resource("virtualmachine"), name, err)
 	}
 
 	dryRunOption := app.getDryRunOption(volumeRequest)
-	log.Log.Object(vm).V(4).Infof(patchingVMFmt, patch)
-	if err := app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(patch), &k8smetav1.PatchOptions{DryRun: dryRunOption}); err != nil {
+	log.Log.Object(vm).V(4).Infof(patchingVMFmt, string(patchBytes))
+	if _, err = app.virtCli.VirtualMachine(vm.Namespace).PatchStatus(context.Background(), vm.Name, types.JSONPatchType, patchBytes, k8smetav1.PatchOptions{DryRun: dryRunOption}); err != nil {
 		log.Log.Object(vm).Errorf("unable to patch vm status: %v", err)
 		if errors.IsInvalid(err) {
 			if statErr, ok := err.(*errors.StatusError); ok {
@@ -1353,14 +1296,6 @@ func (app *SubresourceAPIApp) VMIRemoveVolumeRequestHandler(request *restful.Req
 	app.removeVolumeRequestHandler(request, response, true)
 }
 
-func getMemoryDumpPatchVerb(request *v1.VirtualMachineMemoryDumpRequest) string {
-	verb := "add"
-	if request != nil {
-		verb = "replace"
-	}
-	return verb
-}
-
 func addMemoryDumpRequest(vm, vmCopy *v1.VirtualMachine, memoryDumpReq *v1.VirtualMachineMemoryDumpRequest) error {
 	claimName := memoryDumpReq.ClaimName
 	if vm.Status.MemoryDumpRequest != nil {
@@ -1389,34 +1324,27 @@ func removeMemoryDumpRequest(vm, vmCopy *v1.VirtualMachine, memoryDumpReq *v1.Vi
 	return nil
 }
 
-func generateVMMemoryDumpRequestPatch(vm *v1.VirtualMachine, memoryDumpReq *v1.VirtualMachineMemoryDumpRequest, removeRequest bool) (string, error) {
-	verb := getMemoryDumpPatchVerb(vm.Status.MemoryDumpRequest)
+func generateVMMemoryDumpRequestPatch(vm *v1.VirtualMachine, memoryDumpReq *v1.VirtualMachineMemoryDumpRequest, removeRequest bool) ([]byte, error) {
 	vmCopy := vm.DeepCopy()
 
 	if !removeRequest {
 		if err := addMemoryDumpRequest(vm, vmCopy, memoryDumpReq); err != nil {
-			return "", err
+			return nil, err
 		}
 	} else {
 		if err := removeMemoryDumpRequest(vm, vmCopy, memoryDumpReq); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 
-	oldJson, err := json.Marshal(vm.Status.MemoryDumpRequest)
-	if err != nil {
-		return "", err
-	}
-	newJson, err := json.Marshal(vmCopy.Status.MemoryDumpRequest)
-	if err != nil {
-		return "", err
+	patchSet := patch.New(patch.WithTest("/status/memoryDumpRequest", vm.Status.MemoryDumpRequest))
+	if vm.Status.MemoryDumpRequest != nil {
+		patchSet.AddOption(patch.WithReplace("/status/memoryDumpRequest", vmCopy.Status.MemoryDumpRequest))
+	} else {
+		patchSet.AddOption(patch.WithAdd("/status/memoryDumpRequest", vmCopy.Status.MemoryDumpRequest))
 	}
 
-	test := fmt.Sprintf(`{ "op": "test", "path": "/status/memoryDumpRequest", "value": %s}`, string(oldJson))
-	update := fmt.Sprintf(`{ "op": "%s", "path": "/status/memoryDumpRequest", "value": %s}`, verb, string(newJson))
-	patch := fmt.Sprintf("[%s, %s]", test, update)
-
-	return patch, nil
+	return patchSet.GeneratePayload()
 }
 
 func (app *SubresourceAPIApp) fetchPersistentVolumeClaim(name string, namespace string) (*v12.PersistentVolumeClaim, *errors.StatusError) {
@@ -1520,13 +1448,13 @@ func (app *SubresourceAPIApp) vmMemoryDumpRequestPatchStatus(name, namespace str
 		}
 	}
 
-	patch, err := generateVMMemoryDumpRequestPatch(vm, memoryDumpReq, removeRequest)
+	patchBytes, err := generateVMMemoryDumpRequestPatch(vm, memoryDumpReq, removeRequest)
 	if err != nil {
 		return errors.NewConflict(v1.Resource("virtualmachine"), name, err)
 	}
 
-	log.Log.Object(vm).V(4).Infof(patchingVMFmt, patch)
-	if err := app.statusUpdater.PatchStatus(vm, types.JSONPatchType, []byte(patch), &k8smetav1.PatchOptions{}); err != nil {
+	log.Log.Object(vm).V(4).Infof(patchingVMFmt, string(patchBytes))
+	if _, err = app.virtCli.VirtualMachine(vm.Namespace).PatchStatus(context.Background(), vm.Name, types.JSONPatchType, patchBytes, k8smetav1.PatchOptions{}); err != nil {
 		log.Log.Object(vm).Errorf("unable to patch vm status: %v", err)
 		if errors.IsInvalid(err) {
 			if statErr, ok := err.(*errors.StatusError); ok {
@@ -1695,7 +1623,7 @@ func (app *SubresourceAPIApp) SEVSetupSessionHandler(request *restful.Request, r
 	}
 
 	log.Log.Object(vmi).Infof("Patching vmi: %s", string(patch))
-	if _, err := app.virtCli.VirtualMachineInstance(vmi.Namespace).Patch(context.Background(), vmi.Name, types.JSONPatchType, patch, &k8smetav1.PatchOptions{}); err != nil {
+	if _, err := app.virtCli.VirtualMachineInstance(vmi.Namespace).Patch(context.Background(), vmi.Name, types.JSONPatchType, patch, k8smetav1.PatchOptions{}); err != nil {
 		log.Log.Object(vmi).Reason(err).Errorf("Failed to patch vmi")
 		writeError(errors.NewInternalError(err), response)
 		return

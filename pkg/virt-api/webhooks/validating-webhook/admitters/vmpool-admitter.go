@@ -20,8 +20,11 @@
 package admitters
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+
+	"kubevirt.io/kubevirt/pkg/virt-config/deprecation"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -41,7 +44,7 @@ type VMPoolAdmitter struct {
 	ClusterConfig *virtconfig.ClusterConfig
 }
 
-func (admitter *VMPoolAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+func (admitter *VMPoolAdmitter) Admit(_ context.Context, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 
 	if ar.Request == nil {
 		err := fmt.Errorf("Empty request for virtual machine pool validation")
@@ -76,6 +79,17 @@ func (admitter *VMPoolAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissio
 	}
 
 	causes := ValidateVMPoolSpec(ar, k8sfield.NewPath("spec"), &pool, admitter.ClusterConfig)
+
+	if ar.Request.Operation == admissionv1.Create {
+		clusterCfg := admitter.ClusterConfig.GetConfig()
+		if devCfg := clusterCfg.DeveloperConfiguration; devCfg != nil {
+			causes = append(
+				causes,
+				deprecation.ValidateFeatureGates(devCfg.FeatureGates, &pool.Spec.VirtualMachineTemplate.Spec.Template.Spec)...,
+			)
+		}
+	}
+
 	if len(causes) > 0 {
 		return webhookutils.ToAdmissionResponse(causes)
 	}

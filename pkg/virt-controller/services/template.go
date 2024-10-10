@@ -22,11 +22,12 @@ package services
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/rand"
+	"os"
 	"strconv"
 	"strings"
 
-	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,17 +35,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/kubectl/pkg/cmd/util/podcmd"
-	"k8s.io/utils/pointer"
 	v1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1alpha1"
+	exportv1 "kubevirt.io/api/export/v1beta1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/client-go/precond"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
+
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/hooks"
+	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-controller"
+	"kubevirt.io/kubevirt/pkg/network/downwardapi"
 	"kubevirt.io/kubevirt/pkg/network/istio"
-	"kubevirt.io/kubevirt/pkg/network/namescheme"
 	"kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/storage/reservation"
 	"kubevirt.io/kubevirt/pkg/storage/types"
@@ -52,8 +55,10 @@ import (
 	"kubevirt.io/kubevirt/pkg/util/net/dns"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-controller/network"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/descheduler"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
+	operatorutil "kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
 
 const (
@@ -77,13 +82,10 @@ const debugLogs = "debugLogs"
 const logVerbosity = "logVerbosity"
 const virtiofsDebugLogs = "virtiofsdDebugLogs"
 
-const MultusNetworksAnnotation = "k8s.v1.cni.cncf.io/networks"
-
 const qemuTimeoutJitterRange = 120
 
 const (
 	CAP_NET_BIND_SERVICE = "NET_BIND_SERVICE"
-	CAP_NET_RAW          = "NET_RAW"
 	CAP_SYS_NICE         = "SYS_NICE"
 )
 
@@ -91,20 +93,7 @@ const (
 // Libvirt needs roughly 10 seconds to start.
 const LibvirtStartupDelay = 10
 
-// These perfixes for node feature discovery, are used in a NodeSelector on the pod
-// to match a VirtualMachineInstance CPU model(Family) and/or features to nodes that support them.
-const NFD_CPU_MODEL_PREFIX = "cpu-model.node.kubevirt.io/"
-const NFD_CPU_FEATURE_PREFIX = "cpu-feature.node.kubevirt.io/"
-const NFD_KVM_INFO_PREFIX = "hyperv.node.kubevirt.io/"
 const IntelVendorName = "Intel"
-
-// Istio list of virtual interfaces whose inbound traffic (from VM) will be treated as outbound traffic in envoy
-const ISTIO_KUBEVIRT_ANNOTATION = "traffic.sidecar.istio.io/kubevirtInterfaces"
-
-const VELERO_PREBACKUP_HOOK_CONTAINER_ANNOTATION = "pre.hook.backup.velero.io/container"
-const VELERO_PREBACKUP_HOOK_COMMAND_ANNOTATION = "pre.hook.backup.velero.io/command"
-const VELERO_POSTBACKUP_HOOK_CONTAINER_ANNOTATION = "post.hook.backup.velero.io/container"
-const VELERO_POSTBACKUP_HOOK_COMMAND_ANNOTATION = "post.hook.backup.velero.io/command"
 
 const ENV_VAR_LIBVIRT_DEBUG_LOGS = "LIBVIRT_DEBUG_LOGS"
 const ENV_VAR_VIRTIOFSD_DEBUG_LOGS = "VIRTIOFSD_DEBUG_LOGS"
@@ -125,20 +114,33 @@ const (
 	QemuOverhead                = "30Mi"  // The `ps` RSS for qemu, minus the RAM of its (stressed) guest, minus the virtual page table
 	// Default: limits.memory = 2*requests.memory
 	DefaultMemoryLimitOverheadRatio = float64(2.0)
+
+	FailedToRenderLaunchManifestErrFormat = "failed to render launch manifest: %v"
 )
 
-const customSELinuxType = "virt_launcher.process"
+type netBindingPluginMemoryCalculator interface {
+	Calculate(vmi *v1.VirtualMachineInstance, registeredPlugins map[string]v1.InterfaceBindingPlugin) resource.Quantity
+}
+
+type annotationsGenerator interface {
+	Generate(vmi *v1.VirtualMachineInstance) (map[string]string, error)
+}
+
+type targetAnnotationsGenerator interface {
+	GenerateFromSource(vmi *v1.VirtualMachineInstance, sourcePod *k8sv1.Pod) (map[string]string, error)
+}
 
 type TemplateService interface {
 	RenderMigrationManifest(vmi *v1.VirtualMachineInstance, sourcePod *k8sv1.Pod) (*k8sv1.Pod, error)
 	RenderLaunchManifest(vmi *v1.VirtualMachineInstance) (*k8sv1.Pod, error)
-	RenderHotplugAttachmentPodTemplate(volume []*v1.Volume, ownerPod *k8sv1.Pod, vmi *v1.VirtualMachineInstance, claimMap map[string]*k8sv1.PersistentVolumeClaim, tempPod bool) (*k8sv1.Pod, error)
+	RenderHotplugAttachmentPodTemplate(volumes []*v1.Volume, ownerPod *k8sv1.Pod, vmi *v1.VirtualMachineInstance, claimMap map[string]*k8sv1.PersistentVolumeClaim) (*k8sv1.Pod, error)
 	RenderHotplugAttachmentTriggerPodTemplate(volume *v1.Volume, ownerPod *k8sv1.Pod, vmi *v1.VirtualMachineInstance, pvcName string, isBlock bool, tempPod bool) (*k8sv1.Pod, error)
 	RenderLaunchManifestNoVm(*v1.VirtualMachineInstance) (*k8sv1.Pod, error)
 	RenderExporterManifest(vmExport *exportv1.VirtualMachineExport, namePrefix string) *k8sv1.Pod
 	GetLauncherImage() string
 	IsPPC64() bool
 	IsARM64() bool
+	IsS390X() bool
 }
 
 type templateService struct {
@@ -158,7 +160,10 @@ type templateService struct {
 	resourceQuotaStore         cache.Store
 	namespaceStore             cache.Store
 
-	sidecarCreators []SidecarCreatorFunc
+	sidecarCreators                  []SidecarCreatorFunc
+	netBindingPluginMemoryCalculator netBindingPluginMemoryCalculator
+	annotationsGenerators            []annotationsGenerator
+	netTargetAnnotationsGenerator    targetAnnotationsGenerator
 }
 
 func isFeatureStateEnabled(fs *v1.FeatureState) bool {
@@ -183,7 +188,7 @@ func setNodeAffinityForbiddenFeaturePolicy(vmi *v1.VirtualMachineInstance, pod *
 
 	for _, feature := range vmi.Spec.Domain.CPU.Features {
 		if feature.Policy == "forbid" {
-			pod.Spec.Affinity = modifyNodeAffintyToRejectLabel(pod.Spec.Affinity, NFD_CPU_FEATURE_PREFIX+feature.Name)
+			pod.Spec.Affinity = modifyNodeAffintyToRejectLabel(pod.Spec.Affinity, v1.CPUFeatureLabel+feature.Name)
 		}
 	}
 }
@@ -257,24 +262,23 @@ func (t *templateService) RenderLaunchManifestNoVm(vmi *v1.VirtualMachineInstanc
 	return t.renderLaunchManifest(vmi, nil, true)
 }
 
-func (t *templateService) RenderMigrationManifest(vmi *v1.VirtualMachineInstance, pod *k8sv1.Pod) (*k8sv1.Pod, error) {
-	imageIDs := containerdisk.ExtractImageIDsFromSourcePod(vmi, pod)
-	podManifest, err := t.renderLaunchManifest(vmi, imageIDs, false)
+func (t *templateService) RenderMigrationManifest(vmi *v1.VirtualMachineInstance, sourcePod *k8sv1.Pod) (*k8sv1.Pod, error) {
+	imageIDs := containerdisk.ExtractImageIDsFromSourcePod(vmi, sourcePod)
+	targetPod, err := t.renderLaunchManifest(vmi, imageIDs, false)
 	if err != nil {
 		return nil, err
 	}
 
-	if namescheme.PodHasOrdinalInterfaceName(network.NonDefaultMultusNetworksIndexedByIfaceName(pod)) {
-		ordinalNameScheme := namescheme.CreateOrdinalNetworkNameScheme(vmi.Spec.Networks)
-		multusNetworksAnnotation, err := network.GenerateMultusCNIAnnotationFromNameScheme(
-			vmi.Namespace, vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, ordinalNameScheme, t.clusterConfig)
+	if t.netTargetAnnotationsGenerator != nil {
+		netAnnotations, err := t.netTargetAnnotationsGenerator.GenerateFromSource(vmi, sourcePod)
 		if err != nil {
 			return nil, err
 		}
-		podManifest.Annotations[networkv1.NetworkAttachmentAnnot] = multusNetworksAnnotation
+
+		maps.Copy(targetPod.Annotations, netAnnotations)
 	}
 
-	return podManifest, err
+	return targetPod, err
 }
 
 func (t *templateService) RenderLaunchManifest(vmi *v1.VirtualMachineInstance) (*k8sv1.Pod, error) {
@@ -287,6 +291,10 @@ func (t *templateService) IsPPC64() bool {
 
 func (t *templateService) IsARM64() bool {
 	return t.clusterConfig.GetClusterCPUArch() == "arm64"
+}
+
+func (t *templateService) IsS390X() bool {
+	return t.clusterConfig.GetClusterCPUArch() == "s390x"
 }
 
 func generateQemuTimeoutWithJitter(qemuTimeoutBaseSeconds int) string {
@@ -302,7 +310,7 @@ func computePodSecurityContext(vmi *v1.VirtualMachineInstance, seccomp *k8sv1.Se
 		nonRootUser := int64(util.NonRootUID)
 		psc.RunAsUser = &nonRootUser
 		psc.RunAsGroup = &nonRootUser
-		psc.RunAsNonRoot = pointer.Bool(true)
+		psc.RunAsNonRoot = pointer.P(true)
 		psc.FSGroup = &nonRootUser
 	} else {
 		rootUser := int64(util.RootUser)
@@ -485,7 +493,7 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 			volumeSource := k8sv1.VolumeSource{
 				ConfigMap: &k8sv1.ConfigMapVolumeSource{
 					LocalObjectReference: k8sv1.LocalObjectReference{Name: cm.Name},
-					DefaultMode:          pointer.Int32(0755),
+					DefaultMode:          pointer.P(int32(0755)),
 				},
 			}
 			vol := k8sv1.Volume{
@@ -516,7 +524,7 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 		containers = append(containers, sidecarContainer)
 	}
 
-	podAnnotations, err := generatePodAnnotations(vmi, t.clusterConfig)
+	podAnnotations, err := t.generatePodAnnotations(vmi)
 	if err != nil {
 		return nil, err
 	}
@@ -678,6 +686,9 @@ func newSidecarContainerRenderer(sidecarName string, vmiSpec *v1.VirtualMachineI
 
 	var mounts []k8sv1.VolumeMount
 	mounts = append(mounts, sidecarVolumeMount())
+	if requestedHookSidecar.DownwardAPI == v1.DeviceInfo {
+		mounts = append(mounts, mountPath(downwardapi.NetworkInfoVolumeName, downwardapi.MountPath))
+	}
 	if requestedHookSidecar.ConfigMap != nil {
 		mounts = append(mounts, configMapVolumeMount(*requestedHookSidecar.ConfigMap))
 	}
@@ -690,6 +701,10 @@ func newSidecarContainerRenderer(sidecarName string, vmiSpec *v1.VirtualMachineI
 		sidecarOpts = append(sidecarOpts, WithNonRoot(userId))
 		sidecarOpts = append(sidecarOpts, WithDropALLCapabilities())
 	}
+	if requestedHookSidecar.Image == "" {
+		requestedHookSidecar.Image = os.Getenv(operatorutil.SidecarShimImageEnvName)
+	}
+
 	return NewContainerSpecRenderer(
 		sidecarName,
 		requestedHookSidecar.Image,
@@ -763,8 +778,13 @@ func (t *templateService) newVolumeRenderer(vmi *v1.VirtualMachineInstance, name
 		volumeOpts = append(volumeOpts, withHotplugSupport(t.hotplugDiskDir))
 	}
 
-	if vmispec.SRIOVInterfaceExist(vmi.Spec.Domain.Devices.Interfaces) {
-		volumeOpts = append(volumeOpts, withSRIOVPciMapAnnotation())
+	if vmispec.BindingPluginNetworkWithDeviceInfoExist(vmi.Spec.Domain.Devices.Interfaces, t.clusterConfig.GetNetworkBindings()) ||
+		vmispec.SRIOVInterfaceExist(vmi.Spec.Domain.Devices.Interfaces) {
+		volumeOpts = append(volumeOpts, func(renderer *VolumeRenderer) error {
+			renderer.podVolumeMounts = append(renderer.podVolumeMounts, mountPath(downwardapi.NetworkInfoVolumeName, downwardapi.MountPath))
+			return nil
+		})
+		volumeOpts = append(volumeOpts, withNetworkDeviceInfoMapAnnotation())
 	}
 
 	if util.IsVMIVirtiofsEnabled(vmi) {
@@ -832,7 +852,7 @@ func sidecarContainerName(i int) string {
 	return fmt.Sprintf("hook-sidecar-%d", i)
 }
 
-func (t *templateService) RenderHotplugAttachmentPodTemplate(volumes []*v1.Volume, ownerPod *k8sv1.Pod, vmi *v1.VirtualMachineInstance, claimMap map[string]*k8sv1.PersistentVolumeClaim, tempPod bool) (*k8sv1.Pod, error) {
+func (t *templateService) RenderHotplugAttachmentPodTemplate(volumes []*v1.Volume, ownerPod *k8sv1.Pod, vmi *v1.VirtualMachineInstance, claimMap map[string]*k8sv1.PersistentVolumeClaim) (*k8sv1.Pod, error) {
 	zero := int64(0)
 	runUser := int64(util.NonRootUID)
 	sharedMount := k8sv1.MountPropagationHostToContainer
@@ -863,8 +883,8 @@ func (t *templateService) RenderHotplugAttachmentPodTemplate(volumes []*v1.Volum
 					Command:   command,
 					Resources: hotplugContainerResourceRequirementsForVMI(vmi, t.clusterConfig),
 					SecurityContext: &k8sv1.SecurityContext{
-						AllowPrivilegeEscalation: pointer.Bool(false),
-						RunAsNonRoot:             pointer.Bool(true),
+						AllowPrivilegeEscalation: pointer.P(false),
+						RunAsNonRoot:             pointer.P(true),
 						RunAsUser:                &runUser,
 						SeccompProfile: &k8sv1.SeccompProfile{
 							Type: k8sv1.SeccompProfileTypeRuntimeDefault,
@@ -895,7 +915,7 @@ func (t *templateService) RenderHotplugAttachmentPodTemplate(volumes []*v1.Volum
 							{
 								MatchExpressions: []k8sv1.NodeSelectorRequirement{
 									{
-										Key:      "kubernetes.io/hostname",
+										Key:      k8sv1.LabelHostname,
 										Operator: k8sv1.NodeSelectorOpIn,
 										Values:   []string{ownerPod.Spec.NodeName},
 									},
@@ -1006,8 +1026,8 @@ func (t *templateService) RenderHotplugAttachmentTriggerPodTemplate(volume *v1.V
 					Command:   command,
 					Resources: hotplugContainerResourceRequirementsForVMI(vmi, t.clusterConfig),
 					SecurityContext: &k8sv1.SecurityContext{
-						AllowPrivilegeEscalation: pointer.Bool(false),
-						RunAsNonRoot:             pointer.Bool(true),
+						AllowPrivilegeEscalation: pointer.P(false),
+						RunAsNonRoot:             pointer.P(true),
 						RunAsUser:                &runUser,
 						SeccompProfile: &k8sv1.SeccompProfile{
 							Type: k8sv1.SeccompProfileTypeRuntimeDefault,
@@ -1035,7 +1055,7 @@ func (t *templateService) RenderHotplugAttachmentTriggerPodTemplate(volume *v1.V
 							LabelSelector: &metav1.LabelSelector{
 								MatchLabels: ownerPod.GetLabels(),
 							},
-							TopologyKey: "kubernetes.io/hostname",
+							TopologyKey: k8sv1.LabelHostname,
 						},
 					},
 				},
@@ -1115,7 +1135,7 @@ func (t *templateService) RenderExporterManifest(vmExport *exportv1.VirtualMachi
 						},
 					},
 					SecurityContext: &k8sv1.SecurityContext{
-						AllowPrivilegeEscalation: pointer.Bool(false),
+						AllowPrivilegeEscalation: pointer.P(false),
 						Capabilities:             &k8sv1.Capabilities{Drop: []k8sv1.Capability{"ALL"}},
 					},
 					Resources: vmExportContainerResourceRequirements(t.clusterConfig),
@@ -1158,16 +1178,6 @@ func addProbeOverhead(probe *v1.Probe, to *resource.Quantity) bool {
 		to.Add(virtProbeOverhead)
 		return true
 	}
-	return false
-}
-
-func HaveMasqueradeInterface(interfaces []v1.Interface) bool {
-	for _, iface := range interfaces {
-		if iface.Masquerade != nil {
-			return true
-		}
-	}
-
 	return false
 }
 
@@ -1312,59 +1322,29 @@ func generateContainerSecurityContext(selinuxType string, container *k8sv1.Conta
 	container.SecurityContext.SELinuxOptions.Level = "s0"
 }
 
-func generatePodAnnotations(vmi *v1.VirtualMachineInstance, config *virtconfig.ClusterConfig) (map[string]string, error) {
+func (t *templateService) generatePodAnnotations(vmi *v1.VirtualMachineInstance) (map[string]string, error) {
 	annotationsSet := map[string]string{
 		v1.DomainAnnotation: vmi.GetObjectMeta().GetName(),
 	}
-	for k, v := range filterVMIAnnotationsForPod(vmi.Annotations) {
-		annotationsSet[k] = v
-	}
+	maps.Copy(annotationsSet, filterVMIAnnotationsForPod(vmi.Annotations))
 
 	annotationsSet[podcmd.DefaultContainerAnnotationName] = "compute"
-
-	nonAbsentIfaces := vmispec.FilterInterfacesSpec(vmi.Spec.Domain.Devices.Interfaces, func(iface v1.Interface) bool {
-		return iface.State != v1.InterfaceStateAbsent
-	})
-	nonAbsentNets := vmispec.FilterNetworksByInterfaces(vmi.Spec.Networks, nonAbsentIfaces)
-	multusAnnotation, err := network.GenerateMultusCNIAnnotation(vmi.Namespace, nonAbsentIfaces, nonAbsentNets, config)
-	if err != nil {
-		return nil, err
-	}
-	if multusAnnotation != "" {
-		annotationsSet[MultusNetworksAnnotation] = multusAnnotation
-	}
-
-	if multusDefaultNetwork := lookupMultusDefaultNetworkName(vmi.Spec.Networks); multusDefaultNetwork != "" {
-		annotationsSet[network.MULTUS_DEFAULT_NETWORK_CNI_ANNOTATION] = multusDefaultNetwork
-	}
-
-	if HaveMasqueradeInterface(vmi.Spec.Domain.Devices.Interfaces) {
-		annotationsSet[ISTIO_KUBEVIRT_ANNOTATION] = "k6t-eth0"
-	}
-	annotationsSet[VELERO_PREBACKUP_HOOK_CONTAINER_ANNOTATION] = "compute"
-	annotationsSet[VELERO_PREBACKUP_HOOK_COMMAND_ANNOTATION] = fmt.Sprintf(
-		"[\"/usr/bin/virt-freezer\", \"--freeze\", \"--name\", \"%s\", \"--namespace\", \"%s\"]",
-		vmi.GetObjectMeta().GetName(),
-		vmi.GetObjectMeta().GetNamespace())
-	annotationsSet[VELERO_POSTBACKUP_HOOK_CONTAINER_ANNOTATION] = "compute"
-	annotationsSet[VELERO_POSTBACKUP_HOOK_COMMAND_ANNOTATION] = fmt.Sprintf(
-		"[\"/usr/bin/virt-freezer\", \"--unfreeze\", \"--name\", \"%s\", \"--namespace\", \"%s\"]",
-		vmi.GetObjectMeta().GetName(),
-		vmi.GetObjectMeta().GetNamespace())
 
 	// Set this annotation now to indicate that the newly created virt-launchers will use
 	// unix sockets as a transport for migration
 	annotationsSet[v1.MigrationTransportUnixAnnotation] = "true"
-	return annotationsSet, nil
-}
+	annotationsSet[descheduler.EvictOnlyAnnotation] = ""
 
-func lookupMultusDefaultNetworkName(networks []v1.Network) string {
-	for _, network := range networks {
-		if network.Multus != nil && network.Multus.Default {
-			return network.Multus.NetworkName
+	for _, generator := range t.annotationsGenerators {
+		annotations, err := generator.Generate(vmi)
+		if err != nil {
+			return nil, err
 		}
+
+		maps.Copy(annotationsSet, annotations)
 	}
-	return ""
+
+	return annotationsSet, nil
 }
 
 func filterVMIAnnotationsForPod(vmiAnnotations map[string]string) map[string]string {
@@ -1443,6 +1423,14 @@ func (t *templateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, 
 		vmiCPUArch = t.clusterConfig.GetClusterCPUArch()
 	}
 	memoryOverhead := GetMemoryOverhead(vmi, vmiCPUArch, t.clusterConfig.GetConfig().AdditionalGuestMemoryOverheadRatio)
+
+	if t.netBindingPluginMemoryCalculator != nil {
+		memoryOverhead.Add(
+			t.netBindingPluginMemoryCalculator.Calculate(vmi, t.clusterConfig.GetNetworkBindings()),
+		)
+	}
+
+	metrics.SetVmiLaucherMemoryOverhead(vmi, memoryOverhead)
 	withCPULimits := t.doesVMIRequireAutoCPULimits(vmi)
 	return VMIResourcePredicates{
 		vmi: vmi,
@@ -1513,5 +1501,23 @@ func readinessGates() []k8sv1.PodReadinessGate {
 		{
 			ConditionType: v1.VirtualMachineUnpaused,
 		},
+	}
+}
+
+func WithNetBindingPluginMemoryCalculator(netBindingPluginMemoryCalculator netBindingPluginMemoryCalculator) templateServiceOption {
+	return func(service *templateService) {
+		service.netBindingPluginMemoryCalculator = netBindingPluginMemoryCalculator
+	}
+}
+
+func WithAnnotationsGenerators(generators ...annotationsGenerator) templateServiceOption {
+	return func(service *templateService) {
+		service.annotationsGenerators = append(service.annotationsGenerators, generators...)
+	}
+}
+
+func WithNetTargetAnnotationsGenerator(generator targetAnnotationsGenerator) templateServiceOption {
+	return func(service *templateService) {
+		service.netTargetAnnotationsGenerator = generator
 	}
 }

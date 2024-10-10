@@ -20,7 +20,6 @@
 package utils
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -33,17 +32,13 @@ import (
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
-
 	v1 "kubevirt.io/api/core/v1"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
 	poolv1 "kubevirt.io/api/pool/v1alpha1"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
-	k6tpointer "kubevirt.io/kubevirt/pkg/pointer"
+	"kubevirt.io/kubevirt/pkg/pointer"
 )
 
 const (
@@ -69,7 +64,6 @@ const (
 	VmiPVC                      = "vmi-pvc"
 	VmiWindows                  = "vmi-windows"
 	VmiKernelBoot               = "vmi-kernel-boot"
-	VmiSlirp                    = "vmi-slirp"
 	VmiMasquerade               = "vmi-masquerade"
 	VmiSRIOV                    = "vmi-sriov"
 	VmiWithHookSidecar          = "vmi-with-sidecar-hook"
@@ -79,7 +73,6 @@ const (
 	VmiHostDisk                 = "vmi-host-disk"
 	VmiGPU                      = "vmi-gpu"
 	VmiARM                      = "vmi-arm"
-	VmiMacvtap                  = "vmi-macvtap"
 	VmiUSB                      = "vmi-usb"
 	VmTemplateFedora            = "vm-template-fedora"
 	VmTemplateRHEL7             = "vm-template-rhel7"
@@ -106,11 +99,12 @@ const (
 )
 
 const (
-	VmCirros           = "vm-cirros"
-	VmAlpineMultiPvc   = "vm-alpine-multipvc"
-	VmAlpineDataVolume = "vm-alpine-datavolume"
-	VMPriorityClass    = "vm-priorityclass"
-	VmCirrosSata       = "vm-cirros-sata"
+	VmCirros                         = "vm-cirros"
+	VmAlpineMultiPvc                 = "vm-alpine-multipvc"
+	VmAlpineDataVolume               = "vm-alpine-datavolume"
+	VMPriorityClass                  = "vm-priorityclass"
+	VmCirrosSata                     = "vm-cirros-sata"
+	VmCirrosWithHookSidecarConfigMap = "vm-cirros-with-sidecar-hook-configmap"
 )
 
 const VmiReplicaSetCirros = "vmi-replicaset-cirros"
@@ -130,8 +124,6 @@ const (
 	imageKernelBoot = "alpine-ext-kernel-boot-demo"
 )
 const windowsFirmware = "5d307ca9-b3ef-428c-8861-06e72d69f223"
-const defaultInterfaceName = "default"
-const enableNetworkInterfaceMultiqueueForTemplate = true
 const EthernetAdaptorModelToEnableMultiqueue = v1.VirtIO
 
 const (
@@ -186,12 +178,6 @@ func getBaseVMI(name string) *v1.VirtualMachineInstance {
 	}
 }
 
-func initFedoraWithDisk(spec *v1.VirtualMachineInstanceSpec, containerDisk string) *v1.VirtualMachineInstanceSpec {
-	addContainerDisk(spec, containerDisk, v1.DiskBusVirtio)
-	addRNG(spec)
-	return spec
-}
-
 func initFedora(spec *v1.VirtualMachineInstanceSpec) *v1.VirtualMachineInstanceSpec {
 	addContainerDisk(spec, fmt.Sprintf(strFmt, DockerPrefix, imageFedora, DockerTag), v1.DiskBusVirtio)
 	addRNG(spec) // without RNG, newer fedora images may hang waiting for entropy sources
@@ -202,25 +188,6 @@ func initFedoraIsolated(spec *v1.VirtualMachineInstanceSpec) *v1.VirtualMachineI
 	addRNG(spec) // without RNG, newer fedora images may hang waiting for entropy sources
 
 	addDedicatedAndIsolatedCPU(spec)
-	return spec
-}
-func enableNetworkInterfaceMultiqueue(spec *v1.VirtualMachineInstanceSpec, enable bool) {
-	spec.Domain.Devices.NetworkInterfaceMultiQueue = &enable
-}
-
-func setDefaultNetworkAndInterface(spec *v1.VirtualMachineInstanceSpec, bindingMethod v1.InterfaceBindingMethod, networkSource v1.NetworkSource) *v1.VirtualMachineInstanceSpec {
-	spec.Domain.Devices.Interfaces = []v1.Interface{
-		{
-			Name:                   defaultInterfaceName,
-			InterfaceBindingMethod: bindingMethod,
-			Model:                  EthernetAdaptorModelToEnableMultiqueue},
-	}
-	spec.Networks = []v1.Network{
-		{
-			Name:          defaultInterfaceName,
-			NetworkSource: networkSource},
-	}
-
 	return spec
 }
 
@@ -399,33 +366,6 @@ func addPVCDisk(spec *v1.VirtualMachineInstanceSpec, claimName string, bus v1.Di
 	return spec
 }
 
-func addEphemeralPVCDisk(spec *v1.VirtualMachineInstanceSpec, claimName string, bus v1.DiskBus, diskName string) *v1.VirtualMachineInstanceSpec {
-
-	// Only add a reference to the disk if it isn't using the default v1.DiskBusSATA bus
-	if bus != v1.DiskBusSATA {
-		spec.Domain.Devices.Disks = append(spec.Domain.Devices.Disks, v1.Disk{
-			Name: diskName,
-			DiskDevice: v1.DiskDevice{
-				Disk: &v1.DiskTarget{
-					Bus: bus,
-				},
-			},
-		})
-	}
-
-	spec.Volumes = append(spec.Volumes, v1.Volume{
-		Name: diskName,
-		VolumeSource: v1.VolumeSource{
-			Ephemeral: &v1.EphemeralVolumeSource{
-				PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
-					ClaimName: claimName,
-				},
-			},
-		},
-	})
-	return spec
-}
-
 func addHostDisk(spec *v1.VirtualMachineInstanceSpec, path string, hostDiskType v1.HostDiskType, size string) *v1.VirtualMachineInstanceSpec {
 	spec.Domain.Devices.Disks = append(spec.Domain.Devices.Disks, v1.Disk{
 		Name: "host-disk",
@@ -525,23 +465,6 @@ func GetVMIAlpineEFI() *v1.VirtualMachineInstance {
 
 	vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("1Gi")
 	return vmi
-}
-
-func GetVMISlirp() *v1.VirtualMachineInstance {
-	vm := getBaseVMI(VmiSlirp)
-	vm.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("1024M")
-	vm.Spec.Networks = []v1.Network{{Name: "testSlirp", NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}}}}
-
-	initFedora(&vm.Spec)
-	addNoCloudDiskWitUserData(
-		&vm.Spec,
-		generateCloudConfigString(cloudConfigUserPassword, cloudConfigInstallAndStartService))
-
-	slirp := &v1.InterfaceSlirp{}
-	ports := []v1.Port{{Name: "http", Protocol: "TCP", Port: 80}}
-	vm.Spec.Domain.Devices.Interfaces = []v1.Interface{{Name: "testSlirp", Ports: ports, InterfaceBindingMethod: v1.InterfaceBindingMethod{Slirp: slirp}}}
-
-	return vm
 }
 
 func GetVMIMasquerade() *v1.VirtualMachineInstance {
@@ -705,7 +628,6 @@ func AddKernelBootToVMI(vmi *v1.VirtualMachineInstance) {
 
 func getBaseVM(name string, labels map[string]string) *v1.VirtualMachine {
 	baseVMISpec := getBaseVMISpec()
-	running := false
 
 	return &v1.VirtualMachine{
 		TypeMeta: metav1.TypeMeta{
@@ -717,7 +639,7 @@ func getBaseVM(name string, labels map[string]string) *v1.VirtualMachine {
 			Labels: labels,
 		},
 		Spec: v1.VirtualMachineSpec{
-			Running: &running,
+			RunStrategy: pointer.P(v1.RunStrategyHalted),
 			Template: &v1.VirtualMachineInstanceTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
@@ -777,6 +699,23 @@ func GetVMCirros() *v1.VirtualMachine {
 	return vm
 }
 
+func GetVMCirrosWithHookSidecarConfigMap() *v1.VirtualMachine {
+	vm := getBaseVM(VmCirrosWithHookSidecarConfigMap, map[string]string{
+		kubevirtIoVM: VmCirrosWithHookSidecarConfigMap,
+	})
+
+	addContainerDisk(&vm.Spec.Template.Spec, fmt.Sprintf(strFmt, DockerPrefix, imageCirros, DockerTag), v1.DiskBusVirtio)
+	addNoCloudDisk(&vm.Spec.Template.Spec)
+
+	if vm.Spec.Template.ObjectMeta.Annotations == nil {
+		vm.Spec.Template.ObjectMeta.Annotations = make(map[string]string)
+	}
+	vm.Spec.Template.ObjectMeta.Annotations["hooks.kubevirt.io/hookSidecars"] = `[{"args": ["--version", "v1alpha2"], "configMap": {"name": "my-config-map",` +
+		`"key": "my_script.sh", "hookPath": "/usr/bin/onDefineDomain"}}]`
+
+	return vm
+}
+
 func GetVMCirrosSata() *v1.VirtualMachine {
 	vm := getBaseVM(VmCirrosSata, map[string]string{
 		kubevirtIoVM: VmCirrosSata,
@@ -786,203 +725,6 @@ func GetVMCirrosSata() *v1.VirtualMachine {
 	addNoCloudDisk(&vm.Spec.Template.Spec)
 	vm.Spec.Template.Spec.Domain.Devices = v1.Devices{}
 	return vm
-}
-
-func GetTemplateFedoraWithContainerDisk(containerDisk string) *Template {
-	vm := getFedoraVMWithoutDisk()
-	initFedoraWithDisk(&vm.Spec.Template.Spec, containerDisk)
-	return createFedoraTemplateFromVM(vm)
-}
-
-func getFedoraVMWithoutDisk() *v1.VirtualMachine {
-	vm := getBaseVM("", map[string]string{kubevirtVM: vmName, kubevirtIoOS: "fedora27"})
-	spec := &vm.Spec.Template.Spec
-	addNoCloudDiskWitUserData(spec, generateCloudConfigString(cloudConfigUserPassword))
-
-	setDefaultNetworkAndInterface(spec, v1.InterfaceBindingMethod{
-		Masquerade: &v1.InterfaceMasquerade{},
-	},
-		v1.NetworkSource{
-			Pod: &v1.PodNetwork{},
-		})
-
-	enableNetworkInterfaceMultiqueue(spec, enableNetworkInterfaceMultiqueueForTemplate)
-
-	return vm
-}
-
-func createFedoraTemplateFromVM(vm *v1.VirtualMachine) *Template {
-	template := getBaseTemplate(vm, "4096Mi", "4")
-	template.ObjectMeta = metav1.ObjectMeta{
-		Name: VmTemplateFedora,
-		Annotations: map[string]string{
-			"description": "OCP KubeVirt Fedora 27 VM template",
-			"tags":        "kubevirt,ocp,template,linux,virtualmachine",
-			"iconClass":   "icon-fedora",
-		},
-		Labels: map[string]string{
-			kubevirtIoOS:               "fedora27",
-			githubKubevirtIsVMTemplate: "true",
-		},
-	}
-	return template
-}
-
-func GetTemplateFedora() *Template {
-	vm := getFedoraVMWithoutDisk()
-	initFedora(&vm.Spec.Template.Spec)
-	return createFedoraTemplateFromVM(vm)
-}
-
-func GetTemplateRHEL7() *Template {
-	vm := getBaseVM("", map[string]string{kubevirtVM: vmName, kubevirtIoOS: rhel74})
-	spec := &vm.Spec.Template.Spec
-	setDefaultNetworkAndInterface(spec, v1.InterfaceBindingMethod{
-		Masquerade: &v1.InterfaceMasquerade{},
-	},
-		v1.NetworkSource{
-			Pod: &v1.PodNetwork{},
-		})
-
-	enableNetworkInterfaceMultiqueue(spec, enableNetworkInterfaceMultiqueueForTemplate)
-
-	addPVCDisk(spec, "linux-vm-pvc-${NAME}", v1.DiskBusVirtio, "disk0")
-	pvc := getPVCForTemplate("linux-vm-pvc-${NAME}")
-	template := newTemplateForRHEL7VM(vm)
-	template.Objects = append(template.Objects, pvc)
-	return template
-}
-
-func GetTestTemplateRHEL7() *Template {
-	vm := getBaseVM("", map[string]string{kubevirtVM: vmName, kubevirtIoOS: rhel74})
-	spec := &vm.Spec.Template.Spec
-	addEphemeralPVCDisk(spec, "disk-rhel", v1.DiskBusSATA, "pvcdisk")
-	setDefaultNetworkAndInterface(spec, v1.InterfaceBindingMethod{
-		Masquerade: &v1.InterfaceMasquerade{},
-	},
-		v1.NetworkSource{
-			Pod: &v1.PodNetwork{},
-		})
-
-	enableNetworkInterfaceMultiqueue(spec, enableNetworkInterfaceMultiqueueForTemplate)
-
-	return newTemplateForRHEL7VM(vm)
-}
-
-func newTemplateForRHEL7VM(vm *v1.VirtualMachine) *Template {
-	template := getBaseTemplate(vm, "4096Mi", "4")
-	template.ObjectMeta = metav1.ObjectMeta{
-		Name: VmTemplateRHEL7,
-		Annotations: map[string]string{
-			"iconClass":   "icon-rhel",
-			"description": "OCP KubeVirt Red Hat Enterprise Linux 7.4 VM template",
-			"tags":        "kubevirt,ocp,template,linux,virtualmachine",
-		},
-		Labels: map[string]string{
-			kubevirtIoOS:               rhel74,
-			githubKubevirtIsVMTemplate: "true",
-		},
-	}
-	return template
-}
-
-func GetTemplateWindows() *Template {
-	vm := getBaseVM("", map[string]string{kubevirtVM: vmName, kubevirtIoOS: "win2k12r2"})
-	windows := GetVMIWindows()
-	vm.Spec.Template.Spec = windows.Spec
-	vm.Spec.Template.ObjectMeta.Annotations = windows.ObjectMeta.Annotations
-	addPVCDisk(&vm.Spec.Template.Spec, "windows-vm-pvc-${NAME}", v1.DiskBusVirtio, "disk0")
-
-	pvc := getPVCForTemplate("windows-vm-pvc-${NAME}")
-
-	template := getBaseTemplate(vm, "4096Mi", "4")
-	template.ObjectMeta = metav1.ObjectMeta{
-		Name: VmTemplateWindows,
-		Annotations: map[string]string{
-			"iconClass":   "icon-windows",
-			"description": "OCP KubeVirt Microsoft Windows Server 2012 R2 VM template",
-			"tags":        "kubevirt,ocp,template,windows,virtualmachine",
-		},
-		Labels: map[string]string{
-			kubevirtIoOS:               "win2k12r2",
-			githubKubevirtIsVMTemplate: "true",
-		},
-	}
-	template.Objects = append(template.Objects, pvc)
-	return template
-}
-
-func getPVCForTemplate(name string) *k8sv1.PersistentVolumeClaim {
-
-	return &k8sv1.PersistentVolumeClaim{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "PersistentVolumeClaim",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Spec: k8sv1.PersistentVolumeClaimSpec{
-			AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
-			Resources: k8sv1.ResourceRequirements{
-				Requests: k8sv1.ResourceList{
-					k8sv1.ResourceStorage: resource.MustParse("10Gi"),
-				},
-			},
-		},
-	}
-}
-
-func getBaseTemplate(vm *v1.VirtualMachine, memory string, cores string) *Template {
-
-	obj := toUnstructured(vm)
-	unstructured.SetNestedField(obj.Object, "${{CPU_CORES}}", "spec", "template", "spec", "domain", "cpu", "cores")
-	unstructured.SetNestedField(obj.Object, "${MEMORY}", "spec", "template", "spec", "domain", "resources", "requests", "memory")
-	obj.SetName("${NAME}")
-
-	return &Template{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Template",
-			APIVersion: "template.openshift.io/v1",
-		},
-		Objects: []runtime.Object{
-			obj,
-		},
-		Parameters: templateParameters(memory, cores),
-	}
-}
-
-func toUnstructured(object runtime.Object) *unstructured.Unstructured {
-	raw, err := json.Marshal(object)
-	if err != nil {
-		panic(err)
-	}
-	var objmap map[string]interface{}
-	err = json.Unmarshal(raw, &objmap)
-	if err != nil {
-		panic(err)
-	}
-
-	return &unstructured.Unstructured{Object: objmap}
-}
-
-func templateParameters(memory string, cores string) []Parameter {
-	return []Parameter{
-		{
-			Name:        "NAME",
-			Description: "Name for the new VM",
-		},
-		{
-			Name:        "MEMORY",
-			Description: "Amount of memory",
-			Value:       memory,
-		},
-		{
-			Name:        "CPU_CORES",
-			Description: "Amount of cores",
-			Value:       cores,
-		},
-	}
 }
 
 func GetVMDataVolume() *v1.VirtualMachine {
@@ -1009,7 +751,7 @@ func GetVMDataVolume() *v1.VirtualMachine {
 			},
 			PVC: &k8sv1.PersistentVolumeClaimSpec{
 				AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
-				Resources: k8sv1.ResourceRequirements{
+				Resources: k8sv1.VolumeResourceRequirements{
 					Requests: k8sv1.ResourceList{
 						"storage": quantity,
 					},
@@ -1153,10 +895,10 @@ func GetVMIMigration() *v1.VirtualMachineInstanceMigration {
 func GetMigrationPolicy() *v1alpha1.MigrationPolicy {
 	policy := kubecli.NewMinimalMigrationPolicy(MigrationPolicyName)
 	policy.Spec = v1alpha1.MigrationPolicySpec{
-		AllowAutoConverge:       k6tpointer.P(false),
-		BandwidthPerMigration:   k6tpointer.P(resource.MustParse("2000Mi")),
-		CompletionTimeoutPerGiB: k6tpointer.P(int64(123456789)),
-		AllowPostCopy:           k6tpointer.P(false),
+		AllowAutoConverge:       pointer.P(false),
+		BandwidthPerMigration:   pointer.P(resource.MustParse("2000Mi")),
+		CompletionTimeoutPerGiB: pointer.P(int64(123456789)),
+		AllowPostCopy:           pointer.P(false),
 		Selectors: &v1alpha1.Selectors{
 			NamespaceSelector:              map[string]string{"namespace-key": "namespace-value"},
 			VirtualMachineInstanceSelector: map[string]string{"vmi-key": "vmi-value"},
@@ -1202,8 +944,7 @@ func GetVmiWithHookSidecarConfigMap() *v1.VirtualMachineInstance {
 	initFedora(&vmi.Spec)
 	addNoCloudDiskWitUserData(&vmi.Spec, generateCloudConfigString(cloudConfigUserPassword))
 
-	annotation := `[{"args": ["--version", "v1alpha2"], "image":` +
-		`"registry:5000/kubevirt/sidecar-shim:devel", "configMap": {"name": "my-config-map",` +
+	annotation := `[{"args": ["--version", "v1alpha2"], "configMap": {"name": "my-config-map",` +
 		`"key": "my_script.sh", "hookPath": "/usr/bin/onDefineDomain"}}]`
 
 	vmi.ObjectMeta.Annotations = map[string]string{
@@ -1225,19 +966,6 @@ func GetVMIGPU() *v1.VirtualMachineInstance {
 	vmi.Spec.Domain.Devices.GPUs = GPUs
 	initFedora(&vmi.Spec)
 	addNoCloudDiskWitUserData(&vmi.Spec, generateCloudConfigString(cloudConfigUserPassword))
-	return vmi
-}
-
-func GetVMIMacvtap() *v1.VirtualMachineInstance {
-	vmi := getBaseVMI(VmiMacvtap)
-	macvtapNetworkName := "macvtap"
-	vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("1024M")
-	vmi.Spec.Networks = []v1.Network{{Name: macvtapNetworkName, NetworkSource: v1.NetworkSource{Multus: &v1.MultusNetwork{NetworkName: "macvtapnetwork"}}}}
-	initFedora(&vmi.Spec)
-	addNoCloudDiskWitUserData(&vmi.Spec, generateCloudConfigString(cloudConfigUserPassword, cloudConfigInstallAndStartService))
-
-	macvtap := &v1.InterfaceMacvtap{}
-	vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{Name: macvtapNetworkName, InterfaceBindingMethod: v1.InterfaceBindingMethod{Macvtap: macvtap}}}
 	return vmi
 }
 
@@ -1397,7 +1125,7 @@ func GetVirtualMachinePreferenceVirtio() *instancetypev1beta1.VirtualMachinePref
 
 func GetVirtualMachinePreferenceWindows() *instancetypev1beta1.VirtualMachinePreference {
 	spinlocks := uint32(8191)
-	preferredCPUTopology := instancetypev1beta1.PreferSockets
+	preferredCPUTopology := instancetypev1beta1.Sockets
 	return &instancetypev1beta1.VirtualMachinePreference{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: instancetypev1beta1.SchemeGroupVersion.String(),
@@ -1413,7 +1141,7 @@ func GetVirtualMachinePreferenceWindows() *instancetypev1beta1.VirtualMachinePre
 			Clock: &instancetypev1beta1.ClockPreferences{
 				PreferredClockOffset: &v1.ClockOffset{UTC: &v1.ClockOffsetUTC{}},
 				PreferredTimer: &v1.Timer{
-					HPET:   &v1.HPETTimer{Enabled: pointer.Bool(false)},
+					HPET:   &v1.HPETTimer{Enabled: pointer.P(false)},
 					PIT:    &v1.PITTimer{TickPolicy: v1.PITTickPolicyDelay},
 					RTC:    &v1.RTCTimer{TickPolicy: v1.RTCTickPolicyCatchup},
 					Hyperv: &v1.HypervTimer{},
@@ -1435,8 +1163,8 @@ func GetVirtualMachinePreferenceWindows() *instancetypev1beta1.VirtualMachinePre
 				PreferredSmm: &v1.FeatureState{},
 			},
 			Firmware: &instancetypev1beta1.FirmwarePreferences{
-				PreferredUseEfi:        pointer.Bool(true),
-				PreferredUseSecureBoot: pointer.Bool(true),
+				PreferredUseEfi:        pointer.P(true),
+				PreferredUseSecureBoot: pointer.P(true),
 			},
 		},
 	}
@@ -1501,7 +1229,7 @@ func GetVmWindowsInstancetypeComputeLargePreferencesWindows() *v1.VirtualMachine
 	addPVCDisk(&vm.Spec.Template.Spec, "disk-windows", "", "pvcdisk")
 
 	// Copy the same remaining defaults as the vmi-windows example
-	vm.Spec.Template.Spec.TerminationGracePeriodSeconds = pointer.Int64(0)
+	vm.Spec.Template.Spec.TerminationGracePeriodSeconds = pointer.P(int64(0))
 	vm.Spec.Template.Spec.Domain.Firmware = &v1.Firmware{
 		UUID: types.UID(windowsFirmware),
 	}

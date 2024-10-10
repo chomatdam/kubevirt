@@ -10,20 +10,20 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 
 	instancetypev1alpha1 "kubevirt.io/api/instancetype/v1alpha1"
 	instancetypev1alpha2 "kubevirt.io/api/instancetype/v1alpha2"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
-	snapshotv1alpha1 "kubevirt.io/api/snapshot/v1alpha1"
+	snapshotv1beta1 "kubevirt.io/api/snapshot/v1beta1"
+
+	"kubevirt.io/kubevirt/pkg/pointer"
 )
 
 var _ = Describe("compatibility", func() {
-
 	generateUnknownObjectControllerRevision := func() *appsv1.ControllerRevision {
-		unknownObject := snapshotv1alpha1.VirtualMachineSnapshot{
+		unknownObject := snapshotv1beta1.VirtualMachineSnapshot{
 			TypeMeta: metav1.TypeMeta{
-				APIVersion: snapshotv1alpha1.SchemeGroupVersion.String(),
+				APIVersion: snapshotv1beta1.SchemeGroupVersion.String(),
 				Kind:       "VirtualMachineSnapshot",
 			},
 		}
@@ -47,9 +47,9 @@ var _ = Describe("compatibility", func() {
 				CPU: instancetypev1beta1.CPUInstancetype{
 					Guest: 4,
 					// Set the following values to be compatible with objects converted from prior API versions
-					Model:                 ptr.To(""),
-					DedicatedCPUPlacement: ptr.To(false),
-					IsolateEmulatorThread: ptr.To(false),
+					Model:                 pointer.P(""),
+					DedicatedCPUPlacement: pointer.P(false),
+					IsolateEmulatorThread: pointer.P(false),
 				},
 				Memory: instancetypev1beta1.MemoryInstancetype{
 					Guest: resource.MustParse("128Mi"),
@@ -252,7 +252,7 @@ var _ = Describe("compatibility", func() {
 		var expectedPreferenceSpec *instancetypev1beta1.VirtualMachinePreferenceSpec
 
 		BeforeEach(func() {
-			preferredCPUTopology := instancetypev1beta1.PreferCores
+			preferredCPUTopology := instancetypev1beta1.DeprecatedPreferCores
 			expectedPreferenceSpec = &instancetypev1beta1.VirtualMachinePreferenceSpec{
 				CPU: &instancetypev1beta1.CPUPreferences{
 					PreferredCPUTopology: &preferredCPUTopology,
@@ -277,7 +277,7 @@ var _ = Describe("compatibility", func() {
 		}
 
 		generatev1beta1PreferenceSpec := func() instancetypev1beta1.VirtualMachinePreferenceSpec {
-			preferredTopology := instancetypev1beta1.PreferCores
+			preferredTopology := instancetypev1beta1.DeprecatedPreferCores
 			return instancetypev1beta1.VirtualMachinePreferenceSpec{
 				CPU: &instancetypev1beta1.CPUPreferences{
 					PreferredCPUTopology: &preferredTopology,

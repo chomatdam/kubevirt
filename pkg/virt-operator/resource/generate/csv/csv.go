@@ -22,8 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"k8s.io/utils/pointer"
-
 	"github.com/coreos/go-semver/semver"
 	csvv1 "github.com/operator-framework/operator-lifecycle-manager/pkg/api/apis/operators/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -33,6 +31,7 @@ import (
 
 	virtv1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
 )
@@ -56,6 +55,7 @@ type NewClusterServiceVersionData struct {
 	VirtExportServerSha   string
 	GsSha                 string
 	PrHelperSha           string
+	SidecarShimSha        string
 	RunbookURLTemplate    string
 	Replicas              int
 	IconBase64            string
@@ -70,6 +70,7 @@ type NewClusterServiceVersionData struct {
 	VirtExportServerImage string
 	GsImage               string
 	PrHelperImage         string
+	SidecarShimImage      string
 }
 
 type csvClusterPermissions struct {
@@ -173,6 +174,7 @@ func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.Cluste
 		data.VirtExportServerSha,
 		data.GsSha,
 		data.PrHelperSha,
+		data.SidecarShimSha,
 		data.RunbookURLTemplate,
 		data.VirtApiImage,
 		data.VirtControllerImage,
@@ -182,6 +184,7 @@ func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.Cluste
 		data.VirtExportServerImage,
 		data.GsImage,
 		data.PrHelperImage,
+		data.SidecarShimImage,
 		data.VirtOperatorImage,
 		v1.PullPolicy(data.ImagePullPolicy))
 	if err != nil {
@@ -191,7 +194,7 @@ func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.Cluste
 	imageVersion := components.AddVersionSeparatorPrefix(data.OperatorImageVersion)
 
 	if data.Replicas > 0 && *deployment.Spec.Replicas != int32(data.Replicas) {
-		deployment.Spec.Replicas = pointer.Int32(int32(data.Replicas))
+		deployment.Spec.Replicas = pointer.P(int32(data.Replicas))
 	}
 
 	clusterRules := rbac.NewOperatorClusterRole().Rules

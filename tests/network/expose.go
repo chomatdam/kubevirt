@@ -9,6 +9,7 @@ import (
 
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libvmops"
 
 	"kubevirt.io/kubevirt/tests/console"
 	"kubevirt.io/kubevirt/tests/exec"
@@ -17,6 +18,7 @@ import (
 	"kubevirt.io/kubevirt/tests/libnet/cluster"
 	"kubevirt.io/kubevirt/tests/libnet/job"
 
+	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
@@ -30,11 +32,13 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	"kubevirt.io/kubevirt/pkg/libvmi/replicaset"
+
 	"kubevirt.io/kubevirt/tests/clientcmd"
 	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/libpod"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 )
 
 const (
@@ -52,9 +56,7 @@ func newLabeledVMI(label string) (vmi *v1.VirtualMachineInstance) {
 		{Name: "test-port-tcp", Port: 1500, Protocol: "TCP"},
 		{Name: "udp", Port: 82, Protocol: "UDP"},
 		{Name: "test-port-udp", Port: 1500, Protocol: "UDP"}}
-	vmi = libvmi.NewAlpineWithTestTooling(
-		libnet.WithMasqueradeNetworking(ports...)...,
-	)
+	vmi = libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking(ports...))
 	vmi.Labels = map[string]string{"expose": label}
 	return
 }
@@ -91,41 +93,12 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 		virtClient = kubevirt.Client()
 	})
 
-	createAndWaitForJobToSucceed := func(jobFactory func(host, port string) *batchv1.Job, namespace, ip, port, viaMessage string) error {
-		By(fmt.Sprintf("Starting a job which tries to reach the VMI via the %s", viaMessage))
-		jobInstance := jobFactory(ip, port)
-		jobInstance, err := virtClient.BatchV1().Jobs(namespace).Create(context.Background(), jobInstance, metav1.CreateOptions{})
-		ExpectWithOffset(1, err).ToNot(HaveOccurred())
-
-		By("Waiting for the job to report a successful connection attempt")
-		return job.WaitForJobToSucceed(jobInstance, time.Duration(120)*time.Second)
-	}
-
-	getService := func(namespace, serviceName string) (*k8sv1.Service, error) {
-		svc, err := virtClient.CoreV1().Services(namespace).Get(context.Background(), serviceName, k8smetav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-
-		return svc, nil
-	}
-
-	runJobsAgainstService := func(svc *k8sv1.Service, namespace string, jobFactories ...func(host, port string) *batchv1.Job) {
-		serviceIPs := svc.Spec.ClusterIPs
-		for _, jobFactory := range jobFactories {
-			for ipOrderNum, ip := range serviceIPs {
-				servicePort := fmt.Sprint(svc.Spec.Ports[0].Port)
-				Expect(createAndWaitForJobToSucceed(jobFactory, namespace, ip, servicePort, fmt.Sprintf("%d ClusterIP", ipOrderNum+1))).To(Succeed())
-			}
-		}
-	}
-
 	Context("Expose service on a VM", func() {
 		var tcpVM *v1.VirtualMachineInstance
 		BeforeEach(func() {
 			tcpVM = newLabeledVMI("vm")
-			tcpVM = tests.RunVMIAndExpectLaunch(tcpVM, 180)
-			tests.GenerateHelloWorldServer(tcpVM, testPort, "tcp", console.LoginToAlpine, false)
+			tcpVM = libvmops.RunVMIAndExpectLaunch(tcpVM, 180)
+			generateHelloWorldServer(tcpVM, testPort, "tcp", console.LoginToAlpine, false)
 		})
 
 		Context("Expose ClusterIP service", func() {
@@ -151,13 +124,14 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				Expect(executeVirtctlExposeCommand(vmiExposeArgs)).To(Succeed(), shouldExposeServiceViaVirtctl)
 
 				By(gettingValidatingClusterIP)
-				svc, err := getService(tcpVM.Namespace, serviceName)
+				svc, err := virtClient.CoreV1().Services(tcpVM.Namespace).Get(context.Background(), serviceName, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				err = validateClusterIp(svc.Spec.ClusterIP, ipFamily)
 				Expect(err).ToNot(HaveOccurred())
 
 				By(iteratingClusterIPs)
-				runJobsAgainstService(svc, tcpVM.Namespace, job.NewHelloWorldJobTCP)
+				err = runJobAgainstService(svc, tcpVM.Namespace, job.NewHelloWorldJobTCP)
+				Expect(err).ToNot(HaveOccurred())
 			},
 				Entry("[test_id:1531] over default IPv4 IP family", ipv4),
 				Entry(overIPv6Family, ipv6),
@@ -284,10 +258,6 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 			})
 
 			DescribeTable("Should expose a ClusterIP service with the correct IPFamilyPolicy", func(ipFamiyPolicy k8sv1.IPFamilyPolicyType) {
-				if ipFamiyPolicy == k8sv1.IPFamilyPolicyRequireDualStack {
-					libnet.SkipWhenNotDualStackCluster()
-				}
-
 				calcNumOfClusterIPs := func() int {
 					switch ipFamiyPolicy {
 					case k8sv1.IPFamilyPolicySingleStack:
@@ -311,7 +281,7 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				Expect(executeVirtctlExposeCommand(vmiExposeArgs)).To(Succeed(), shouldExposeServiceViaVirtctl)
 
 				By("Getting the service")
-				svc, err := getService(tcpVM.Namespace, serviceName)
+				svc, err := virtClient.CoreV1().Services(tcpVM.Namespace).Get(context.Background(), serviceName, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Validating the num of cluster ips")
@@ -319,7 +289,7 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 			},
 				Entry("over SingleStack IP family policy", k8sv1.IPFamilyPolicySingleStack),
 				Entry("over PreferDualStack IP family policy", k8sv1.IPFamilyPolicyPreferDualStack),
-				Entry("over RequireDualStack IP family policy", k8sv1.IPFamilyPolicyRequireDualStack),
+				Entry("over RequireDualStack IP family policy", decorators.RequiresDualStackCluster, k8sv1.IPFamilyPolicyRequireDualStack),
 			)
 		})
 
@@ -347,7 +317,7 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				Expect(executeVirtctlExposeCommand(vmiExposeArgs)).To(Succeed(), shouldExposeServiceViaVirtctl)
 
 				By("Getting the service")
-				svc, err := getService(tcpVM.Namespace, serviceName)
+				svc, err := virtClient.CoreV1().Services(tcpVM.Namespace).Get(context.Background(), serviceName, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				nodePort := svc.Spec.Ports[0].NodePort
@@ -364,13 +334,12 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 
 					if includesIpv4(ipFamily) {
 						By("Connecting to IPv4 node IP")
-						Expect(createAndWaitForJobToSucceed(job.NewHelloWorldJobTCP, tcpVM.Namespace, nodeIP, strconv.Itoa(int(nodePort)), fmt.Sprintf("NodePort using %s node ip", ipFamily))).To(Succeed())
+						Expect(createAndWaitForJobToSucceed(job.NewHelloWorldJobTCP(nodeIP, strconv.Itoa(int(nodePort))), tcpVM.Namespace, fmt.Sprintf("NodePort using %s node ip", ipFamily))).To(Succeed())
 					}
 					if inlcudesIpv6(ipFamily) {
 						launcher, err := libpod.GetPodByVirtualMachineInstance(tcpVM, tcpVM.GetNamespace())
 						Expect(err).ToNot(HaveOccurred())
 						ipv6NodeIP, err = resolveNodeIPAddrByFamily(
-							virtClient,
 							launcher,
 							node,
 							k8sv1.IPv6Protocol)
@@ -378,7 +347,7 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 						Expect(ipv6NodeIP).NotTo(BeEmpty(), "must have been able to resolve the IPv6 address of the node")
 
 						By("Connecting to IPv6 node IP")
-						Expect(createAndWaitForJobToSucceed(job.NewHelloWorldJobTCP, tcpVM.Namespace, ipv6NodeIP, strconv.Itoa(int(nodePort)), fmt.Sprintf("NodePort using %s node ip", ipFamily))).To(Succeed())
+						Expect(createAndWaitForJobToSucceed(job.NewHelloWorldJobTCP(ipv6NodeIP, strconv.Itoa(int(nodePort))), tcpVM.Namespace, fmt.Sprintf("NodePort using %s node ip", ipFamily))).To(Succeed())
 					}
 				}
 			},
@@ -394,8 +363,8 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 		var udpVM *v1.VirtualMachineInstance
 		BeforeEach(func() {
 			udpVM = newLabeledVMI("udp-vm")
-			udpVM = tests.RunVMIAndExpectLaunch(udpVM, 180)
-			tests.GenerateHelloWorldServer(udpVM, testPort, "udp", console.LoginToAlpine, false)
+			udpVM = libvmops.RunVMIAndExpectLaunch(udpVM, 180)
+			generateHelloWorldServer(udpVM, testPort, "udp", console.LoginToAlpine, false)
 		})
 
 		Context("Expose ClusterIP UDP service", func() {
@@ -422,13 +391,14 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				Expect(executeVirtctlExposeCommand(vmiExposeArgs)).To(Succeed(), shouldExposeServiceViaVirtctl)
 
 				By(gettingValidatingClusterIP)
-				svc, err := getService(udpVM.Namespace, serviceName)
+				svc, err := virtClient.CoreV1().Services(udpVM.Namespace).Get(context.Background(), serviceName, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				err = validateClusterIp(svc.Spec.ClusterIP, ipFamily)
 				Expect(err).ToNot(HaveOccurred())
 
 				By(iteratingClusterIPs)
-				runJobsAgainstService(svc, udpVM.Namespace, job.NewHelloWorldJobUDP)
+				err = runJobAgainstService(svc, udpVM.Namespace, job.NewHelloWorldJobUDP)
+				Expect(err).ToNot(HaveOccurred())
 			},
 				Entry("[test_id:1535] over default IPv4 IP family", ipv4),
 				Entry(overIPv6Family, ipv6),
@@ -462,7 +432,7 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				Expect(executeVirtctlExposeCommand(vmiExposeArgs)).To(Succeed(), shouldExposeServiceViaVirtctl)
 
 				By(gettingValidatingClusterIP)
-				svc, err := getService(udpVM.Namespace, serviceName)
+				svc, err := virtClient.CoreV1().Services(udpVM.Namespace).Get(context.Background(), serviceName, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				err = validateClusterIp(svc.Spec.ClusterIP, ipFamily)
 				Expect(err).ToNot(HaveOccurred())
@@ -471,7 +441,8 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				Expect(nodePort).To(BeNumerically(">", 0))
 
 				By(iteratingClusterIPs)
-				runJobsAgainstService(svc, udpVM.Namespace, job.NewHelloWorldJobUDP)
+				err = runJobAgainstService(svc, udpVM.Namespace, job.NewHelloWorldJobUDP)
+				Expect(err).ToNot(HaveOccurred())
 
 				By("Getting the node IP from all nodes")
 				nodes, err := virtClient.CoreV1().Nodes().List(context.Background(), k8smetav1.ListOptions{})
@@ -485,7 +456,6 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 						launcher, err := libpod.GetPodByVirtualMachineInstance(udpVM, udpVM.GetNamespace())
 						Expect(err).ToNot(HaveOccurred())
 						ipv6NodeIP, err = resolveNodeIPAddrByFamily(
-							virtClient,
 							launcher,
 							node,
 							k8sv1.IPv6Protocol)
@@ -495,11 +465,11 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 
 					if includesIpv4(ipFamily) {
 						By("Connecting to IPv4 node IP")
-						Expect(createAndWaitForJobToSucceed(job.NewHelloWorldJobUDP, udpVM.Namespace, nodeIP, strconv.Itoa(int(nodePort)), "NodePort ipv4 address")).To(Succeed())
+						Expect(createAndWaitForJobToSucceed(job.NewHelloWorldJobUDP(nodeIP, strconv.Itoa(int(nodePort))), udpVM.Namespace, "NodePort ipv4 address")).To(Succeed())
 					}
 					if inlcudesIpv6(ipFamily) {
 						By("Connecting to IPv6 node IP")
-						Expect(createAndWaitForJobToSucceed(job.NewHelloWorldJobUDP, udpVM.Namespace, ipv6NodeIP, strconv.Itoa(int(nodePort)), "NodePort ipv6 address")).To(Succeed())
+						Expect(createAndWaitForJobToSucceed(job.NewHelloWorldJobUDP(ipv6NodeIP, strconv.Itoa(int(nodePort))), udpVM.Namespace, "NodePort ipv6 address")).To(Succeed())
 					}
 				}
 			},
@@ -517,16 +487,16 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 		var vmrs *v1.VirtualMachineInstanceReplicaSet
 		BeforeEach(func() {
 			By("Creating a VMRS object with 2 replicas")
-			vmrs = tests.NewRandomReplicaSetFromVMI(newLabeledVMI("vmirs"), int32(numberOfVMs))
+			vmrs = replicaset.New(newLabeledVMI("vmirs"), numberOfVMs)
 			vmrs.Labels = map[string]string{"expose": "vmirs"}
 
 			By("Start the replica set")
-			vmrs, err = virtClient.ReplicaSet(testsuite.GetTestNamespace(nil)).Create(vmrs)
+			vmrs, err = virtClient.ReplicaSet(testsuite.GetTestNamespace(nil)).Create(context.Background(), vmrs, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Checking the number of ready replicas")
 			Eventually(func() int {
-				rs, err := virtClient.ReplicaSet(testsuite.GetTestNamespace(nil)).Get(vmrs.ObjectMeta.Name, k8smetav1.GetOptions{})
+				rs, err := virtClient.ReplicaSet(testsuite.GetTestNamespace(nil)).Get(context.Background(), vmrs.ObjectMeta.Name, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return int(rs.Status.ReadyReplicas)
 			}, 120*time.Second, 1*time.Second).Should(Equal(numberOfVMs))
@@ -535,11 +505,11 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 			// TODO: add label to list options
 			// check size of list
 			// remove check for owner
-			vms, err := virtClient.VirtualMachineInstance(vmrs.ObjectMeta.Namespace).List(context.Background(), &k8smetav1.ListOptions{})
+			vms, err := virtClient.VirtualMachineInstance(vmrs.ObjectMeta.Namespace).List(context.Background(), k8smetav1.ListOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			for _, vm := range vms.Items {
 				if vm.OwnerReferences != nil {
-					tests.GenerateHelloWorldServer(&vm, testPort, "tcp", console.LoginToAlpine, false)
+					generateHelloWorldServer(&vm, testPort, "tcp", console.LoginToAlpine, false)
 				}
 			}
 		})
@@ -567,13 +537,14 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				Expect(executeVirtctlExposeCommand(vmirsExposeArgs)).To(Succeed(), shouldExposeServiceViaVirtctl)
 
 				By(gettingValidatingClusterIP)
-				svc, err := getService(vmrs.Namespace, serviceName)
+				svc, err := virtClient.CoreV1().Services(vmrs.Namespace).Get(context.Background(), serviceName, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				err = validateClusterIp(svc.Spec.ClusterIP, ipFamily)
 				Expect(err).ToNot(HaveOccurred())
 
 				By(iteratingClusterIPs)
-				runJobsAgainstService(svc, vmrs.Namespace, job.NewHelloWorldJobTCP)
+				err = runJobAgainstService(svc, vmrs.Namespace, job.NewHelloWorldJobTCP)
+				Expect(err).ToNot(HaveOccurred())
 			},
 				Entry("[test_id:1537] over default IPv4 IP family", ipv4),
 				Entry(overIPv6Family, ipv6),
@@ -592,12 +563,12 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 
 		startVMIFromVMTemplate := func(virtClient kubecli.KubevirtClient, name string, namespace string) *v1.VirtualMachineInstance {
 			By("Calling the start command")
-			virtctl := clientcmd.NewRepeatableVirtctlCommand("start", "--namespace", namespace, name)
-			Expect(virtctl()).To(Succeed(), "should succeed starting a VMI via `virtctl start ...`")
+			err := virtClient.VirtualMachine(namespace).Start(context.Background(), name, &v1.StartOptions{})
+			Expect(err).ToNot(HaveOccurred())
 
 			By("Getting the status of the VMI")
 			Eventually(func() bool {
-				vm, err := virtClient.VirtualMachine(namespace).Get(context.Background(), name, &k8smetav1.GetOptions{})
+				vm, err := virtClient.VirtualMachine(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return vm.Status.Ready
 			}, 120*time.Second, 1*time.Second).Should(BeTrue())
@@ -605,7 +576,7 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 			By("Getting the running VMI")
 			var vmi *v1.VirtualMachineInstance
 			Eventually(func() bool {
-				vmi, err = virtClient.VirtualMachineInstance(namespace).Get(context.Background(), name, &k8smetav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return vmi.Status.Phase == v1.Running
 			}, 120*time.Second, 1*time.Second).Should(BeTrue())
@@ -618,7 +589,7 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 			vm := libvmi.NewVirtualMachine(newLabeledVMI("vm"))
 
 			By("Creating the VM")
-			vm, err = virtClient.VirtualMachine(namespace).Create(context.Background(), vm)
+			vm, err = virtClient.VirtualMachine(namespace).Create(context.Background(), vm, k8smetav1.CreateOptions{})
 			return vm, err
 		}
 
@@ -628,7 +599,7 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 			if vmi == nil {
 				return nil
 			}
-			tests.GenerateHelloWorldServer(vmi, port, protocol, console.LoginToAlpine, false)
+			generateHelloWorldServer(vmi, port, protocol, console.LoginToAlpine, false)
 			return vmi
 		}
 
@@ -661,13 +632,14 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				// This TC also covers:
 				// [test_id:1795] Exposed VM (as a service) can be reconnected multiple times.
 				By(gettingValidatingClusterIP)
-				svc, err := getService(vm.Namespace, serviceName)
+				svc, err := virtClient.CoreV1().Services(vm.Namespace).Get(context.Background(), serviceName, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				err = validateClusterIp(svc.Spec.ClusterIP, ipFamily)
 				Expect(err).ToNot(HaveOccurred())
 
 				By(iteratingClusterIPs)
-				runJobsAgainstService(svc, vm.Namespace, job.NewHelloWorldJobTCP)
+				err = runJobAgainstService(svc, vm.Namespace, job.NewHelloWorldJobTCP)
+				Expect(err).ToNot(HaveOccurred())
 			},
 				Entry("[test_id:1538] over default IPv4 IP family", ipv4),
 				Entry(overIPv6Family, ipv6),
@@ -688,27 +660,27 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				vmObj := vm
 
 				By(gettingValidatingClusterIP)
-				svc, err := getService(vmObj.Namespace, serviceName)
+				svc, err := virtClient.CoreV1().Services(vmObj.Namespace).Get(context.Background(), serviceName, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				err = validateClusterIp(svc.Spec.ClusterIP, ipFamily)
 				Expect(err).ToNot(HaveOccurred())
 
 				By(iteratingClusterIPs)
-				runJobsAgainstService(svc, vmObj.Namespace, job.NewHelloWorldJobTCP)
+				err = runJobAgainstService(svc, vmObj.Namespace, job.NewHelloWorldJobTCP)
+				Expect(err).ToNot(HaveOccurred())
 
 				// Retrieve the current VMI UID, to be compared with the new UID after restart.
-				vmi, err = virtClient.VirtualMachineInstance(vmObj.Namespace).Get(context.Background(), vmObj.Name, &k8smetav1.GetOptions{})
+				vmi, err = virtClient.VirtualMachineInstance(vmObj.Namespace).Get(context.Background(), vmObj.Name, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				vmiUIdBeforeRestart := vmi.GetObjectMeta().GetUID()
 
 				By("Restarting the running VM.")
-				virtctl := clientcmd.NewRepeatableVirtctlCommand("restart", "--namespace", vmObj.Namespace, vmObj.Name)
-				err = virtctl()
+				err = virtClient.VirtualMachine(vmObj.Namespace).Restart(context.Background(), vmObj.Name, &v1.RestartOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Verifying the VMI is back up AFTER restart (in Running status with new UID).")
 				Eventually(func() bool {
-					vmi, err = virtClient.VirtualMachineInstance(vmObj.Namespace).Get(context.Background(), vmObj.Name, &k8smetav1.GetOptions{})
+					vmi, err = virtClient.VirtualMachineInstance(vmObj.Namespace).Get(context.Background(), vmObj.Name, k8smetav1.GetOptions{})
 					if errors.IsNotFound(err) {
 						return false
 					}
@@ -719,11 +691,12 @@ var _ = SIGDescribe("[rfe_id:253][crit:medium][vendor:cnv-qe@redhat.com][level:c
 				}, 120*time.Second, 1*time.Second).Should(BeTrue())
 
 				By("Creating a TCP server on the VM.")
-				tests.GenerateHelloWorldServer(vmi, testPort, "tcp", console.LoginToAlpine, false)
+				generateHelloWorldServer(vmi, testPort, "tcp", console.LoginToAlpine, false)
 
 				By("Repeating the sequence as prior to restarting the VM: Connect to exposed ClusterIP service.")
 				By(iteratingClusterIPs)
-				runJobsAgainstService(svc, vmObj.Namespace, job.NewHelloWorldJobTCP)
+				err = runJobAgainstService(svc, vmObj.Namespace, job.NewHelloWorldJobTCP)
+				Expect(err).ToNot(HaveOccurred())
 			},
 				Entry("[test_id:345] over default IPv4 IP family", ipv4),
 				Entry(overIPv6Family, ipv6),
@@ -782,10 +755,9 @@ func getNodeHostname(nodeAddresses []k8sv1.NodeAddress) *string {
 	return nil
 }
 
-func resolveNodeIp(virtclient kubecli.KubevirtClient, pod *k8sv1.Pod, hostname string, ipFamily k8sv1.IPFamily) (string, error) {
+func resolveNodeIp(pod *k8sv1.Pod, hostname string, ipFamily k8sv1.IPFamily) (string, error) {
 	ahostsCmd := string("ahosts" + ipFamily[2:])
 	output, err := exec.ExecuteCommandOnPod(
-		virtclient,
 		pod,
 		"compute",
 		[]string{"getent", ahostsCmd, hostname})
@@ -803,10 +775,54 @@ func resolveNodeIp(virtclient kubecli.KubevirtClient, pod *k8sv1.Pod, hostname s
 	return "", fmt.Errorf("could not resolve an %s address from %s name", ipFamily, hostname)
 }
 
-func resolveNodeIPAddrByFamily(virtClient kubecli.KubevirtClient, sourcePod *k8sv1.Pod, node k8sv1.Node, ipFamily k8sv1.IPFamily) (string, error) {
+func resolveNodeIPAddrByFamily(sourcePod *k8sv1.Pod, node k8sv1.Node, ipFamily k8sv1.IPFamily) (string, error) {
 	hostname := getNodeHostname(node.Status.Addresses)
 	if hostname == nil {
 		return "", fmt.Errorf("could not get node hostname")
 	}
-	return resolveNodeIp(virtClient, sourcePod, *hostname, ipFamily)
+	return resolveNodeIp(sourcePod, *hostname, ipFamily)
+}
+
+func generateHelloWorldServer(vmi *v1.VirtualMachineInstance, testPort int, protocol string, loginTo console.LoginToFunction, sudoNeeded bool) {
+	Expect(loginTo(vmi)).To(Succeed())
+
+	sudoPrefix := ""
+	if sudoNeeded {
+		sudoPrefix = "sudo "
+	}
+
+	serverCommand := fmt.Sprintf("%snc -klp %d -e echo -e 'Hello World!'&\n", sudoPrefix, testPort)
+	if protocol == "udp" {
+		// nc has to be in a while loop in case of UDP, since it exists after one message
+		serverCommand = fmt.Sprintf("%ssh -c \"while true; do nc -uklp %d -e echo -e 'Hello UDP World!';done\"&\n", sudoPrefix, testPort)
+	}
+	Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
+		&expect.BSnd{S: serverCommand},
+		&expect.BExp{R: console.PromptExpression},
+		&expect.BSnd{S: console.EchoLastReturnValue},
+		&expect.BExp{R: console.RetValue("0")},
+	}, 60)).To(Succeed())
+}
+
+func createAndWaitForJobToSucceed(jobInstance *batchv1.Job, namespace, viaMessage string) error {
+	By(fmt.Sprintf("Starting a job which tries to reach the VMI via the %s", viaMessage))
+	jobInstance, err := kubevirt.Client().BatchV1().Jobs(namespace).Create(context.Background(), jobInstance, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
+	By("Waiting for the job to report a successful connection attempt")
+	return job.WaitForJobToSucceed(jobInstance, time.Duration(120)*time.Second)
+}
+
+func runJobAgainstService(svc *k8sv1.Service, namespace string, jobFactory func(host, port string) *batchv1.Job) error {
+	serviceIPs := svc.Spec.ClusterIPs
+	for ipOrderNum, ip := range serviceIPs {
+		servicePort := strconv.Itoa(int(svc.Spec.Ports[0].Port))
+		err := createAndWaitForJobToSucceed(jobFactory(ip, servicePort), namespace, fmt.Sprintf("%d ClusterIP", ipOrderNum+1))
+		if err != nil {
+			return fmt.Errorf("failed running job against service with ClusterIP %s: %w", ip, err)
+		}
+	}
+	return nil
 }

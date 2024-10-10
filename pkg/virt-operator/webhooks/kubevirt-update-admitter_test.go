@@ -20,6 +20,7 @@
 package webhooks
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -32,10 +33,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
@@ -62,7 +63,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 			VirtualMachineInstanceProfile: &v1.VirtualMachineInstanceProfile{
 				CustomProfile: &v1.CustomProfile{
 					RuntimeDefaultProfile: true,
-					LocalhostProfile:      pointer.String("somethingNotImportant"),
+					LocalhostProfile:      pointer.P("somethingNotImportant"),
 				},
 			},
 		}, []string{vmProfileField.Child("customProfile", "runtimeDefaultProfile").String(), vmProfileField.Child("customProfile", "localhostProfile").String()}),
@@ -172,7 +173,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 			admitter = NewKubeVirtUpdateAdmitter(nil, clusterConfig)
 		})
 
-		admit := func(kubevirt v1.KubeVirt) *admissionv1.AdmissionResponse {
+		admit := func(ctx context.Context, kubevirt v1.KubeVirt) *admissionv1.AdmissionResponse {
 			kvBytes, err := json.Marshal(kubevirt)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -188,7 +189,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 					Operation: admissionv1.Update,
 				},
 			}
-			return admitter.Admit(request)
+			return admitter.Admit(ctx, request)
 		}
 
 		const warn = true
@@ -206,7 +207,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 				},
 			}
 
-			response := admit(kvObject)
+			response := admit(context.Background(), kvObject)
 			Expect(response).NotTo(BeNil())
 			if shouldWarn {
 				Expect(response.Warnings).NotTo(BeEmpty())
@@ -241,7 +242,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 				},
 			}
 
-			response := admit(kvObject)
+			response := admit(context.Background(), kvObject)
 			Expect(response).NotTo(BeNil())
 			if shouldWarn {
 				Expect(response.Warnings).NotTo(BeEmpty())
@@ -298,15 +299,20 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 				},
 			}
 
-			Expect(admitter.Admit(request)).To(Equal(&admissionv1.AdmissionResponse{
+			Expect(admitter.Admit(context.Background(), request)).To(Equal(&admissionv1.AdmissionResponse{
 				Allowed: true,
 				Warnings: []string{
 					expectedWarning,
 				},
 			}))
 		},
-			Entry("with Passt", deprecation.PasstGate, "Passt network binding will be deprecated next release. Please refer to Kubevirt user guide for alternatives."),
-			Entry("with SRIOVLiveMigrationGate", deprecation.SRIOVLiveMigrationGate, "feature gate SRIOVLiveMigration is deprecated, therefore it can be safely removed and is redundant. For more info, please look at: https://github.com/kubevirt/kubevirt/blob/main/docs/deprecation.md"),
+			Entry("with LiveMigration", deprecation.LiveMigrationGate, fmt.Sprintf(deprecation.WarningPattern, deprecation.LiveMigrationGate, deprecation.GA)),
+			Entry("with SRIOVLiveMigration", deprecation.SRIOVLiveMigrationGate, fmt.Sprintf(deprecation.WarningPattern, deprecation.SRIOVLiveMigrationGate, deprecation.GA)),
+			Entry("with NonRoot", deprecation.NonRoot, fmt.Sprintf(deprecation.WarningPattern, deprecation.NonRoot, deprecation.GA)),
+			Entry("with PSA", deprecation.PSA, fmt.Sprintf(deprecation.WarningPattern, deprecation.PSA, deprecation.GA)),
+			Entry("with CPUNodeDiscoveryGate", deprecation.CPUNodeDiscoveryGate, fmt.Sprintf(deprecation.WarningPattern, deprecation.CPUNodeDiscoveryGate, deprecation.GA)),
+			Entry("with Passt", deprecation.PasstGate, deprecation.PasstDiscontinueMessage),
+			Entry("with MacvtapGate", deprecation.MacvtapGate, deprecation.MacvtapDiscontinueMessage),
 		)
 	})
 })

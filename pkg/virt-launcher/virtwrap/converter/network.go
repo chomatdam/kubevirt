@@ -20,23 +20,19 @@
 package converter
 
 import (
-	"bytes"
 	"fmt"
-	"os"
-	"strings"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/vcpu"
 
-	"kubevirt.io/kubevirt/pkg/network/dns"
 	netvmispec "kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
 )
 
-func CreateDomainInterfaces(vmi *v1.VirtualMachineInstance, domain *api.Domain, c *ConverterContext) ([]api.Interface, error) {
+func CreateDomainInterfaces(vmi *v1.VirtualMachineInstance, c *ConverterContext) ([]api.Interface, error) {
 	var domainInterfaces []api.Interface
 
 	nonAbsentIfaces := netvmispec.FilterInterfacesSpec(vmi.Spec.Domain.Devices.Interfaces, func(iface v1.Interface) bool {
@@ -52,14 +48,14 @@ func CreateDomainInterfaces(vmi *v1.VirtualMachineInstance, domain *api.Domain, 
 			return nil, fmt.Errorf("failed to find network %s", iface.Name)
 		}
 
-		if (iface.Binding != nil && c.DomainAttachmentByInterfaceName[iface.Name] != string(v1.Tap)) || iface.SRIOV != nil || iface.Slirp != nil {
+		if (iface.Binding != nil && c.DomainAttachmentByInterfaceName[iface.Name] != string(v1.Tap)) || iface.SRIOV != nil {
 			continue
 		}
 
 		ifaceType := GetInterfaceType(&nonAbsentIfaces[i])
 		domainIface := api.Interface{
 			Model: &api.Model{
-				Type: translateModel(vmi.Spec.Domain.Devices.UseVirtioTransitional, ifaceType),
+				Type: translateModel(vmi.Spec.Domain.Devices.UseVirtioTransitional, ifaceType, vmi.Spec.Architecture),
 			},
 			Alias: api.NewUserDefinedAlias(iface.Name),
 		}
@@ -87,7 +83,8 @@ func CreateDomainInterfaces(vmi *v1.VirtualMachineInstance, domain *api.Domain, 
 			domainIface.Type = "ethernet"
 			if iface.BootOrder != nil {
 				domainIface.BootOrder = &api.BootOrder{Order: *iface.BootOrder}
-			} else {
+			} else if !isS390X(vmi.Spec.Architecture) {
+				// s390x does not support setting ROM tuning, as it is for PCI Devices only
 				domainIface.Rom = &api.Rom{Enabled: "no"}
 			}
 		}
@@ -150,33 +147,9 @@ func isTrue(networkInterfaceMultiQueue *bool) bool {
 	return (networkInterfaceMultiQueue != nil) && (*networkInterfaceMultiQueue)
 }
 
-// returns nameservers [][]byte, searchdomains []string, error
-func GetResolvConfDetailsFromPod() ([][]byte, []string, error) {
-	// #nosec No risk for path injection. resolvConf is static "/etc/resolve.conf"
-	b, err := os.ReadFile(resolvConf)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	nameservers, err := dns.ParseNameservers(string(b))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	searchDomains, err := dns.ParseSearchDomains(string(b))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	log.Log.Reason(err).Infof("Found nameservers in %s: %s", resolvConf, bytes.Join(nameservers, []byte{' '}))
-	log.Log.Reason(err).Infof("Found search domains in %s: %s", resolvConf, strings.Join(searchDomains, " "))
-
-	return nameservers, searchDomains, err
-}
-
-func translateModel(useVirtioTransitional *bool, bus string) string {
+func translateModel(useVirtioTransitional *bool, bus string, archString string) string {
 	if bus == v1.VirtIO {
-		return InterpretTransitionalModelType(useVirtioTransitional)
+		return InterpretTransitionalModelType(useVirtioTransitional, archString)
 	}
 	return bus
 }

@@ -294,10 +294,27 @@ type VirtualMachineInstanceStatus struct {
 	// Memory shows various informations about the VirtualMachine memory.
 	// +optional
 	Memory *MemoryStatus `json:"memory,omitempty"`
+
+	// MigratedVolumes lists the source and destination volumes during the volume migration
+	// +listType=atomic
+	// +optional
+	MigratedVolumes []StorageMigratedVolumeInfo `json:"migratedVolumes,omitempty"`
+}
+
+// StorageMigratedVolumeInfo tracks the information about the source and destination volumes during the volume migration
+type StorageMigratedVolumeInfo struct {
+	// VolumeName is the name of the volume that is being migrated
+	VolumeName string `json:"volumeName"`
+	// SourcePVCInfo contains the information about the source PVC
+	SourcePVCInfo *PersistentVolumeClaimInfo `json:"sourcePVCInfo,omitempty" valid:"required"`
+	// DestinationPVCInfo contains the information about the destination PVC
+	DestinationPVCInfo *PersistentVolumeClaimInfo `json:"destinationPVCInfo,omitempty" valid:"required"`
 }
 
 // PersistentVolumeClaimInfo contains the relavant information virt-handler needs cached about a PVC
 type PersistentVolumeClaimInfo struct {
+	// ClaimName is the name of the PVC
+	ClaimName string `json:"claimName,omitempty"`
 	// AccessModes contains the desired access modes the volume should have.
 	// More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#access-modes-1
 	// +listType=atomic
@@ -323,8 +340,12 @@ type PersistentVolumeClaimInfo struct {
 
 	// Percentage of filesystem's size to be reserved when resizing the PVC
 	// +optional
-	FilesystemOverhead *cdiv1.Percent `json:"filesystemOverhead,omitempty"`
+	FilesystemOverhead *Percent `json:"filesystemOverhead,omitempty"`
 }
+
+// Percent is a string that can only be a value between [0,1)
+// +kubebuilder:validation:Pattern=`^(0(?:\.\d{1,3})?|1)$`
+type Percent string
 
 // VolumeStatus represents information about the status of volumes attached to the VirtualMachineInstance.
 type VolumeStatus struct {
@@ -447,6 +468,11 @@ func (v *VirtualMachineInstance) IsMigratable() bool {
 	return false
 }
 
+func (v *VirtualMachineInstance) IsBlockMigration() bool {
+	return v.Status.MigrationMethod == BlockMigration ||
+		len(v.Status.MigratedVolumes) > 0
+}
+
 func (v *VirtualMachineInstance) IsFinal() bool {
 	return v.Status.Phase == Failed || v.Status.Phase == Succeeded
 }
@@ -539,6 +565,25 @@ const (
 
 	// Indicates whether the VMI is live migratable
 	VirtualMachineInstanceIsMigratable VirtualMachineInstanceConditionType = "LiveMigratable"
+
+	// Indicates that the VMI is in progress of Hot vCPU Plug/UnPlug
+	VirtualMachineInstanceVCPUChange VirtualMachineInstanceConditionType = "HotVCPUChange"
+
+	// Indicates that the VMI is hot(un)plugging memory
+	VirtualMachineInstanceMemoryChange VirtualMachineInstanceConditionType = "HotMemoryChange"
+
+	// Indicates that the VMI has an updates in its volume set
+	VirtualMachineInstanceVolumesChange VirtualMachineInstanceConditionType = "VolumesChange"
+
+	// Summarizes that all the DataVolumes attached to the VMI are Ready or not
+	VirtualMachineInstanceDataVolumesReady VirtualMachineInstanceConditionType = "DataVolumesReady"
+
+	// Indicates whether the VMI is live migratable
+	VirtualMachineInstanceIsStorageLiveMigratable VirtualMachineInstanceConditionType = "StorageLiveMigratable"
+)
+
+// These are valid reasons for VMI conditions.
+const (
 	// Reason means that VMI is not live migratioable because of it's disks collection
 	VirtualMachineInstanceReasonDisksNotMigratable = "DisksNotLiveMigratable"
 	// Reason means that VMI is not live migratioable because of it's network interfaces collection
@@ -555,20 +600,18 @@ const (
 	VirtualMachineInstanceReasonSEVNotMigratable = "SEVNotLiveMigratable"
 	// Reason means that VMI is not live migratable because it uses HyperV Reenlightenment while TSC Frequency is not available
 	VirtualMachineInstanceReasonNoTSCFrequencyMigratable = "NoTSCFrequencyNotLiveMigratable"
+	// Reason means that VMI is not live migratable because it uses HyperV Reenlightenment while TSC Frequency is not available
+	VirtualMachineInstanceReasonHypervPassthroughNotMigratable = "HypervPassthroughNotLiveMigratable"
 	// Reason means that VMI is not live migratable because it requested SCSI persitent reservation
 	VirtualMachineInstanceReasonPRNotMigratable = "PersistentReservationNotLiveMigratable"
-	// Indicates that the VMI is in progress of Hot vCPU Plug/UnPlug
-	VirtualMachineInstanceVCPUChange = "HotVCPUChange"
-	// Indicates that the VMI is hot(un)plugging memory
-	VirtualMachineInstanceMemoryChange = "HotMemoryChange"
-
-	// Summarizes that all the DataVolumes attached to the VMI are Ready or not
-	VirtualMachineInstanceDataVolumesReady = "DataVolumesReady"
-
 	// Reason means that not all of the VMI's DVs are ready
 	VirtualMachineInstanceReasonNotAllDVsReady = "NotAllDVsReady"
 	// Reason means that all of the VMI's DVs are bound and not running
 	VirtualMachineInstanceReasonAllDVsReady = "AllDVsReady"
+	// Indicates a generic reason that the VMI isn't migratable and more details are spiecified in the condition message.
+	VirtualMachineInstanceReasonNotMigratable = "NotMigratable"
+	// Reason means that the volume update change was cancelled
+	VirtualMachineInstanceReasonVolumesChangeCancellation = "VolumesChangeCancellation"
 )
 
 const (
@@ -829,6 +872,9 @@ const (
 	// Used by functional tests to ignore backoff applied to migrations
 	FuncTestForceIgnoreMigrationBackoffAnnotation string = "kubevirt.io/func-test-ignore-migration-backoff"
 
+	// Used by functional tests to simulate memory hotplug failing
+	FuncTestMemoryHotplugFailAnnotation string = "kubevirt.io/func-test-memory-hotplug-fail"
+
 	// This label is used to match virtual machine instance IDs with pods.
 	// Similar to kubevirt.io/domain. Used on Pod.
 	// Internal use only.
@@ -851,6 +897,9 @@ const (
 	// This annotation indicates that a migration is the result of an
 	// automated workload update
 	WorkloadUpdateMigrationAnnotation string = "kubevirt.io/workloadUpdateMigration"
+	// This annotation indicates to abort any migration due to an automated
+	// workload update. It should only be used for testing purposes.
+	WorkloadUpdateMigrationAbortionAnnotation string = "kubevirt.io/testWorkloadUpdateMigrationAbortion"
 	// This label declares whether a particular node is available for
 	// scheduling virtual machine instances on it. Used on Node.
 	NodeSchedulable string = "kubevirt.io/schedulable"
@@ -1051,6 +1100,14 @@ const (
 
 	// EmulatorThreadCompleteToEvenParity alpha annotation will cause Kubevirt to complete the VMI's CPU count to an even parity when IsolateEmulatorThread options are requested
 	EmulatorThreadCompleteToEvenParity string = "alpha.kubevirt.io/EmulatorThreadCompleteToEvenParity"
+
+	// VolumesUpdateMigration indicates that the migration copies and update
+	// the volumes
+	VolumesUpdateMigration string = "kubevirt.io/volume-update-migration"
+
+	// ImmediateDataVolumeCreation indicates that the data volumes should be created immediately
+	// Even if the VM is halted
+	ImmediateDataVolumeCreation string = "kubevirt.io/immediate-data-volume-creation"
 )
 
 func NewVMI(name string, uid types.UID) *VirtualMachineInstance {
@@ -1172,7 +1229,7 @@ func UpdateAntiAffinityFromVMINode(pod *k8sv1.Pod, vmi *VirtualMachineInstance) 
 // This is useful for the case when a migration away from a node must occur.
 func PrepareVMINodeAntiAffinitySelectorRequirement(vmi *VirtualMachineInstance) k8sv1.NodeSelectorRequirement {
 	return k8sv1.NodeSelectorRequirement{
-		Key:      "kubernetes.io/hostname",
+		Key:      k8sv1.LabelHostname,
 		Operator: k8sv1.NodeSelectorOpNotIn,
 		Values:   []string{vmi.Status.NodeName},
 	}
@@ -1472,11 +1529,19 @@ const (
 	RunStrategyOnce VirtualMachineRunStrategy = "Once"
 )
 
+type UpdateVolumesStrategy string
+
+const (
+	UpdateVolumesStrategyMigration   UpdateVolumesStrategy = "Migration"
+	UpdateVolumesStrategyReplacement UpdateVolumesStrategy = "Replacement"
+)
+
 // VirtualMachineSpec describes how the proper VirtualMachine
 // should look like
 type VirtualMachineSpec struct {
 	// Running controls whether the associatied VirtualMachineInstance is created or not
 	// Mutually exclusive with RunStrategy
+	// Deprecated: VirtualMachineInstance field "Running" is now deprecated, please use RunStrategy instead.
 	Running *bool `json:"running,omitempty" optional:"true"`
 
 	// Running state indicates the requested running state of the VirtualMachineInstance
@@ -1495,6 +1560,9 @@ type VirtualMachineSpec struct {
 	// dataVolumeTemplates is a list of dataVolumes that the VirtualMachineInstance template can reference.
 	// DataVolumes in this list are dynamically created for the VirtualMachine and are tied to the VirtualMachine's life-cycle.
 	DataVolumeTemplates []DataVolumeTemplateSpec `json:"dataVolumeTemplates,omitempty"`
+
+	// UpdateVolumesStrategy is the strategy to apply on volumes updates
+	UpdateVolumesStrategy *UpdateVolumesStrategy `json:"updateVolumesStrategy,omitempty"`
 }
 
 // StateChangeRequestType represents the existing state change requests that are possible
@@ -1613,6 +1681,28 @@ type VirtualMachineStatus struct {
 	// updated through an Update() before ObservedGeneration in Status.
 	// +optional
 	DesiredGeneration int64 `json:"desiredGeneration,omitempty" optional:"true"`
+
+	// RunStrategy tracks the last recorded RunStrategy used by the VM.
+	// This is needed to correctly process the next strategy (for now only the RerunOnFailure)
+	RunStrategy VirtualMachineRunStrategy `json:"runStrategy,omitempty" optional:"true"`
+
+	// VolumeUpdateState contains the information about the volumes set
+	// updates related to the volumeUpdateStrategy
+	VolumeUpdateState *VolumeUpdateState `json:"volumeUpdateState,omitempty" optional:"true"`
+}
+
+type VolumeUpdateState struct {
+	// VolumeMigrationState tracks the information related to the volume migration
+	VolumeMigrationState *VolumeMigrationState `json:"volumeMigrationState,omitempty" optional:"true"`
+}
+
+type VolumeMigrationState struct {
+	// MigratedVolumes lists the source and destination volumes during the volume migration
+	// +listType=atomic
+	// +optional
+	MigratedVolumes []StorageMigratedVolumeInfo `json:"migratedVolumes,omitempty"`
+	// ManualRecoveryRequired indicates if the update due to the migration failed and the volumes set needs to be manually restored
+	ManualRecoveryRequired *bool `json:"manualRecoveryRequired,omitempty"`
 }
 
 type VolumeSnapshotStatus struct {
@@ -1669,9 +1759,6 @@ const (
 	// signals with its own condition that it is paused.
 	VirtualMachinePaused VirtualMachineConditionType = "Paused"
 
-	// VirtualMachineInitialized means the virtual machine object has been seen by the VM controller
-	VirtualMachineInitialized VirtualMachineConditionType = "Initialized"
-
 	// VirtualMachineRestartRequired is added when changes made to the VM can't be live-propagated to the VMI
 	VirtualMachineRestartRequired VirtualMachineConditionType = "RestartRequired"
 )
@@ -1691,12 +1778,14 @@ type NetworkInterfaceType string
 const (
 	// Virtual machine instance bride interface
 	BridgeInterface NetworkInterfaceType = "bridge"
-	// Virtual machine instance slirp interface
-	SlirpInterface NetworkInterfaceType = "slirp"
+	// Virtual machine instance slirp interface is deprecated,
+	// Deprecated: Removed in v1.3.
+	DeprecatedSlirpInterface NetworkInterfaceType = "slirp"
 	// Virtual machine instance masquerade interface
 	MasqueradeInterface NetworkInterfaceType = "masquerade"
-	// Virtual machine instance passt interface
-	PasstInterface NetworkInterfaceType = "passt"
+	// Virtual machine instance passt interface is deprecated
+	// Deprecated: Removed in v1.3.
+	DeprecatedPasstInterface NetworkInterfaceType = "passt"
 )
 
 type DriverCache string
@@ -2372,17 +2461,19 @@ type KubeVirtConfiguration struct {
 	CPUModel               string                  `json:"cpuModel,omitempty"`
 	CPURequest             *resource.Quantity      `json:"cpuRequest,omitempty"`
 	DeveloperConfiguration *DeveloperConfiguration `json:"developerConfiguration,omitempty"`
+	// Deprecated. Use architectureConfiguration instead.
 	EmulatedMachines       []string                `json:"emulatedMachines,omitempty"`
 	ImagePullPolicy        k8sv1.PullPolicy        `json:"imagePullPolicy,omitempty"`
 	MigrationConfiguration *MigrationConfiguration `json:"migrations,omitempty"`
 	// Deprecated. Use architectureConfiguration instead.
-	MachineType               string                `json:"machineType,omitempty"`
-	NetworkConfiguration      *NetworkConfiguration `json:"network,omitempty"`
-	OVMFPath                  string                `json:"ovmfPath,omitempty"`
-	SELinuxLauncherType       string                `json:"selinuxLauncherType,omitempty"`
-	DefaultRuntimeClass       string                `json:"defaultRuntimeClass,omitempty"`
-	SMBIOSConfig              *SMBiosConfiguration  `json:"smbios,omitempty"`
-	ArchitectureConfiguration *ArchConfiguration    `json:"architectureConfiguration,omitempty"`
+	MachineType          string                `json:"machineType,omitempty"`
+	NetworkConfiguration *NetworkConfiguration `json:"network,omitempty"`
+	// Deprecated. Use architectureConfiguration instead.
+	OVMFPath                  string               `json:"ovmfPath,omitempty"`
+	SELinuxLauncherType       string               `json:"selinuxLauncherType,omitempty"`
+	DefaultRuntimeClass       string               `json:"defaultRuntimeClass,omitempty"`
+	SMBIOSConfig              *SMBiosConfiguration `json:"smbios,omitempty"`
+	ArchitectureConfiguration *ArchConfiguration   `json:"architectureConfiguration,omitempty"`
 	// EvictionStrategy defines at the cluster level if the VirtualMachineInstance should be
 	// migrated instead of shut-off in case of a node drain. If the VirtualMachineInstance specific
 	// field is set it overrides the cluster level one.
@@ -2436,6 +2527,16 @@ type KubeVirtConfiguration struct {
 	// +nullable
 	// +kubebuilder:validation:Enum=Stage;LiveUpdate
 	VMRolloutStrategy *VMRolloutStrategy `json:"vmRolloutStrategy,omitempty"`
+
+	// CommonInstancetypesDeployment controls the deployment of common-instancetypes resources
+	// +nullable
+	CommonInstancetypesDeployment *CommonInstancetypesDeployment `json:"commonInstancetypesDeployment,omitempty"`
+}
+
+type CommonInstancetypesDeployment struct {
+	// Enabled controls the deployment of common-instancetypes resources, defaults to True.
+	// +nullable
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 type VMRolloutStrategy string
@@ -2488,8 +2589,8 @@ const (
 
 // SupportContainerResources are used to specify the cpu/memory request and limits for the containers that support various features of Virtual Machines. These containers are usually idle and don't require a lot of memory or cpu.
 type SupportContainerResources struct {
-	Type      SupportContainerType       `json:"type"`
-	Resources k8sv1.ResourceRequirements `json:"resources"`
+	Type      SupportContainerType              `json:"type"`
+	Resources ResourceRequirementsWithoutClaims `json:"resources"`
 }
 
 type TLSProtocolVersion string
@@ -2575,7 +2676,7 @@ type MigrationConfiguration struct {
 	BandwidthPerMigration *resource.Quantity `json:"bandwidthPerMigration,omitempty"`
 	// CompletionTimeoutPerGiB is the maximum number of seconds per GiB a migration is allowed to take.
 	// If a live-migration takes longer to migrate than this value multiplied by the size of the VMI,
-	// the migration will be cancelled, unless AllowPostCopy is true. Defaults to 800
+	// the migration will be cancelled, unless AllowPostCopy is true. Defaults to 150
 	CompletionTimeoutPerGiB *int64 `json:"completionTimeoutPerGiB,omitempty"`
 	// ProgressTimeout is the maximum number of seconds a live migration is allowed to make no progress.
 	// Hitting this timeout means a migration transferred 0 data for that many seconds. The migration is
@@ -2749,8 +2850,10 @@ type KSMConfiguration struct {
 
 // NetworkConfiguration holds network options
 type NetworkConfiguration struct {
-	NetworkInterface                  string                            `json:"defaultNetworkInterface,omitempty"`
-	PermitSlirpInterface              *bool                             `json:"permitSlirpInterface,omitempty"`
+	NetworkInterface string `json:"defaultNetworkInterface,omitempty"`
+	// DeprecatedPermitSlirpInterface is an alias for the deprecated PermitSlirpInterface.
+	// Deprecated: Removed in v1.3.
+	DeprecatedPermitSlirpInterface    *bool                             `json:"permitSlirpInterface,omitempty"`
 	PermitBridgeInterfaceOnPodNetwork *bool                             `json:"permitBridgeInterfaceOnPodNetwork,omitempty"`
 	Binding                           map[string]InterfaceBindingPlugin `json:"binding,omitempty"`
 }
@@ -2773,6 +2876,31 @@ type InterfaceBindingPlugin struct {
 	// Migration means the VM using the plugin can be safely migrated
 	// version: 1alphav1
 	Migration *InterfaceBindingMigration `json:"migration,omitempty"`
+	// DownwardAPI specifies what kind of data should be exposed to the binding plugin sidecar.
+	// Supported values: "device-info"
+	// version: v1alphav1
+	// +optional
+	DownwardAPI NetworkBindingDownwardAPIType `json:"downwardAPI,omitempty"`
+
+	// ComputeResourceOverhead specifies the resource overhead that should be added to the compute container when using the binding.
+	// version: v1alphav1
+	// +optional
+	ComputeResourceOverhead *ResourceRequirementsWithoutClaims `json:"computeResourceOverhead,omitempty"`
+}
+
+// ResourceRequirementsWithoutClaims describes the compute resource requirements.
+// This struct was taken from the k8s.ResourceRequirements and cleaned up the `Claims` field.
+type ResourceRequirementsWithoutClaims struct {
+	// Limits describes the maximum amount of compute resources allowed.
+	// More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+	// +optional
+	Limits k8sv1.ResourceList `json:"limits,omitempty" protobuf:"bytes,1,rep,name=limits,casttype=ResourceList,castkey=ResourceName"`
+	// Requests describes the minimum amount of compute resources required.
+	// If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+	// otherwise to an implementation-defined value. Requests cannot exceed Limits.
+	// More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+	// +optional
+	Requests k8sv1.ResourceList `json:"requests,omitempty" protobuf:"bytes,2,rep,name=requests,casttype=ResourceList,castkey=ResourceName"`
 }
 
 type DomainAttachmentType string
@@ -2781,6 +2909,15 @@ const (
 	// Tap domain attachment type is a generic way to bind ethernet connection into guests using tap device
 	// https://libvirt.org/formatdomain.html#generic-ethernet-connection.
 	Tap DomainAttachmentType = "tap"
+)
+
+type NetworkBindingDownwardAPIType string
+
+const (
+	// DeviceInfo network binding API type specifies the device info from the Multus annotation
+	// should be exposed to the binding plugin sidecar
+	// version: v1alphav1
+	DeviceInfo NetworkBindingDownwardAPIType = "device-info"
 )
 
 type InterfaceBindingMigration struct {
@@ -2915,13 +3052,6 @@ func (p PreferenceMatcher) GetRevisionName() string {
 	return p.RevisionName
 }
 
-type LiveUpdateAffinity struct{}
-
-type LiveUpdateCPU struct {
-	// The maximum amount of sockets that can be hot-plugged to the Virtual Machine
-	MaxSockets *uint32 `json:"maxSockets,omitempty" optional:"true"`
-}
-
 type LiveUpdateConfiguration struct {
 	// MaxHotplugRatio is the ratio used to define the max amount
 	// of a hotplug resource that can be made available to a VM
@@ -2930,16 +3060,11 @@ type LiveUpdateConfiguration struct {
 	// defined and MaxHotplugRatio is 2 then MaxGuest = 1Gi
 	// defaults to 4
 	MaxHotplugRatio uint32 `json:"maxHotplugRatio,omitempty"`
-	// MaxCpuSockets holds the maximum amount of sockets that can be hotplugged
+	// MaxCpuSockets provides a MaxSockets value for VMs that do not provide their own.
+	// For VMs with more sockets than maximum the MaxSockets will be set to equal number of sockets.
 	MaxCpuSockets *uint32 `json:"maxCpuSockets,omitempty"`
 	// MaxGuest defines the maximum amount memory that can be allocated
 	// to the guest using hotplug.
-	MaxGuest *resource.Quantity `json:"maxGuest,omitempty"`
-}
-
-type LiveUpdateMemory struct {
-	// MaxGuest defines the maximum amount memory that can be allocated for the VM.
-	// +optional
 	MaxGuest *resource.Quantity `json:"maxGuest,omitempty"`
 }
 

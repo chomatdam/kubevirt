@@ -28,29 +28,30 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
 	"kubevirt.io/kubevirt/tests/libnode"
-
-	"kubevirt.io/kubevirt/tests"
-	"kubevirt.io/kubevirt/tests/util"
 )
 
 func WakeNodeLabellerUp(virtClient kubecli.KubevirtClient) {
 	const fakeModel = "fake-model-1423"
 
 	ginkgo.By("Updating Kubevirt CR to wake node-labeller up")
-	kvConfig := util.GetCurrentKv(virtClient).Spec.Configuration.DeepCopy()
+	kvConfig := libkubevirt.GetCurrentKv(virtClient).Spec.Configuration.DeepCopy()
 	if kvConfig.ObsoleteCPUModels == nil {
 		kvConfig.ObsoleteCPUModels = make(map[string]bool)
 	}
 	kvConfig.ObsoleteCPUModels[fakeModel] = true
-	tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+	config.UpdateKubeVirtConfigValueAndWait(*kvConfig)
 	delete(kvConfig.ObsoleteCPUModels, fakeModel)
-	tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+	config.UpdateKubeVirtConfigValueAndWait(*kvConfig)
 }
 
 func ExpectStoppingNodeLabellerToSucceed(nodeName string, virtClient kubecli.KubevirtClient) *k8sv1.Node {

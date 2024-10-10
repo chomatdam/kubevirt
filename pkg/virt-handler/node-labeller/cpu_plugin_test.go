@@ -1,4 +1,4 @@
-//go:build amd64
+//go:build amd64 || s390x
 
 /*
  * This file is part of the KubeVirt project
@@ -22,7 +22,7 @@
 package nodelabeller
 
 import (
-	"path"
+	"runtime"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -35,12 +35,6 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/testutils"
 	util "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
-)
-
-var features = []string{"apic", "clflush", "cmov"}
-
-const (
-	x86PenrynXml = "x86_Penryn.xml"
 )
 
 var _ = Describe("Node-labeller config", func() {
@@ -68,52 +62,24 @@ var _ = Describe("Node-labeller config", func() {
 			logger:                  log.DefaultLogger(),
 			volumePath:              "testdata",
 			domCapabilitiesFileName: "virsh_domcapabilities.xml",
+			cpuCounter:              nil,
 			hostCPUModel:            hostCPUModel{requiredFeatures: make(map[string]bool, 0)},
+			arch:                    runtime.GOARCH,
 		}
 	})
 
-	It("should return correct cpu file path", func() {
-		p := getPathCPUFeatures(nlController.volumePath, x86PenrynXml)
-		correctPath := path.Join(nlController.volumePath, "cpu_map", x86PenrynXml)
-		Expect(p).To(Equal(correctPath), "cpu file path is not the same")
-	})
-
-	It("should load cpu features", func() {
-		fileName := x86PenrynXml
-		f, err := nlController.loadFeatures(fileName)
-		Expect(err).ToNot(HaveOccurred())
-		for _, val := range features {
-			if _, ok := f[val]; !ok {
-				Expect(ok).To(BeFalse(), "expect feature")
-			}
-		}
-
-	})
-
-	It("should return correct cpu models, features and tsc freqnency", func() {
+	It("should return correct cpu models", func() {
 		err := nlController.loadDomCapabilities()
 		Expect(err).ToNot(HaveOccurred())
 
 		err = nlController.loadHostSupportedFeatures()
 		Expect(err).ToNot(HaveOccurred())
 
-		err = nlController.loadCPUInfo()
-		Expect(err).ToNot(HaveOccurred())
-
-		err = nlController.loadHostCapabilities()
-		Expect(err).ToNot(HaveOccurred())
-
 		cpuModels := nlController.getSupportedCpuModels(nlController.clusterConfig.GetObsoleteCPUModels())
 		cpuFeatures := nlController.getSupportedCpuFeatures()
 
-		Expect(cpuModels).To(HaveLen(5), "number of models must match")
-
+		Expect(cpuModels).To(HaveLen(4), "number of models must match")
 		Expect(cpuFeatures).To(HaveLen(4), "number of features must match")
-		counter, err := nlController.capabilities.GetTSCCounter()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(counter).ToNot(BeNil())
-		Expect(counter.Frequency).To(BeNumerically("==", 4008012000))
-
 	})
 
 	It("No cpu model is usable", func() {
@@ -121,10 +87,8 @@ var _ = Describe("Node-labeller config", func() {
 		err := nlController.loadDomCapabilities()
 		Expect(err).ToNot(HaveOccurred())
 
-		err = nlController.loadCPUInfo()
+		err = nlController.loadHostSupportedFeatures()
 		Expect(err).ToNot(HaveOccurred())
-
-		Expect(nlController.loadHostSupportedFeatures()).To(Succeed())
 
 		cpuModels := nlController.getSupportedCpuModels(nlController.clusterConfig.GetObsoleteCPUModels())
 		cpuFeatures := nlController.getSupportedCpuFeatures()
@@ -132,6 +96,39 @@ var _ = Describe("Node-labeller config", func() {
 		Expect(cpuModels).To(BeEmpty(), "no CPU models are expected to be supported")
 
 		Expect(cpuFeatures).To(HaveLen(4), "number of features doesn't match")
+	})
+
+	It("Should return the cpu features on s390x even without policy='require' property", func() {
+		nlController.arch = "s390x"
+		nlController.volumePath = "testdata/s390x"
+
+		err := nlController.loadHostSupportedFeatures()
+		Expect(err).ToNot(HaveOccurred())
+
+		cpuFeatures := nlController.getSupportedCpuFeatures()
+
+		Expect(cpuFeatures).To(HaveLen(89), "number of features doesn't match")
+	})
+	It("Should return the cpu features on amd64 only with policy='require' property", func() {
+		nlController.arch = "amd64"
+		nlController.volumePath = "testdata/s390x"
+
+		err := nlController.loadHostSupportedFeatures()
+		Expect(err).ToNot(HaveOccurred())
+
+		cpuFeatures := nlController.getSupportedCpuFeatures()
+
+		Expect(cpuFeatures).To(BeEmpty(), "number of features doesn't match")
+	})
+
+	It("Should default to IBM as CPU Vendor on s390x if none is given", func() {
+		nlController.arch = "s390x"
+		nlController.volumePath = "testdata/s390x"
+
+		err := nlController.loadDomCapabilities()
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(nlController.cpuModelVendor).To(Equal("IBM"), "CPU Vendor should be IBM")
 	})
 
 	Context("should return correct host cpu", func() {
@@ -215,7 +212,7 @@ var _ = Describe("Node-labeller config", func() {
 		nlController.removeLabellerLabels(node)
 
 		badKey := ""
-		for key, _ := range node.Labels {
+		for key := range node.Labels {
 			for _, labellerPrefix := range nodeLabellerLabels {
 				if strings.HasPrefix(key, labellerPrefix) {
 					badKey = key
@@ -362,7 +359,7 @@ var nodeLabels = map[string]string{
 	"hyperv.node.kubevirt.io/tlbflush":                                 "true",
 	"hyperv.node.kubevirt.io/vpindex":                                  "true",
 	"kubernetes.io/arch":                                               "amd64",
-	"kubernetes.io/hostname":                                           "node01",
+	k8sv1.LabelHostname:                                                "node01",
 	"kubernetes.io/os":                                                 "linux",
 	"kubevirt.io/schedulable":                                          "true",
 	"node-role.kubernetes.io/control-plane":                            "",

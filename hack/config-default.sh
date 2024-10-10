@@ -37,15 +37,16 @@ cdi_namespace=cdi
 image_pull_policy=${IMAGE_PULL_POLICY:-IfNotPresent}
 verbosity=${VERBOSITY:-2}
 package_name=${PACKAGE_NAME:-kubevirt-dev}
-kubevirtci_git_hash="2402231446-3191285"
+kubevirtci_git_hash="2409241245-d93dec16"
 conn_check_ipv4_address=${CONN_CHECK_IPV4_ADDRESS:-""}
 conn_check_ipv6_address=${CONN_CHECK_IPV6_ADDRESS:-""}
 conn_check_dns=${CONN_CHECK_DNS:-""}
 migration_network_nic=${MIGRATION_NETWORK_NIC:-"eth1"}
 infra_replicas=${KUBEVIRT_INFRA_REPLICAS:-0}
-common_instancetypes_version=${COMMON_INSTANCETYPES_VERSION:-"v0.4.0"}
-cluster_instancetypes_sha256=${CLUSTER_INSTANCETYPES_SHA256:-"0df36cacd86b00fff1bc2c173eb4579573be9c4cc7f291cb06318542a12c2ed2"}
-cluster_preferences_sha256=${CLUSTER_PREFERENCES_SHA256:-"8c5c0102e74bea61e2ee9d2b2816d006149d45a037ba09afbe642b2ffa8e0438"}
+test_image_replicas=${KUBEVIRT_E2E_PARALLEL_NODES:-6}
+common_instancetypes_version=${COMMON_INSTANCETYPES_VERSION:-"v1.1.0"}
+cluster_instancetypes_sha256=${CLUSTER_INSTANCETYPES_SHA256:-"35a6fac783b162f2687a212954f5d210498e52c2db8f37e44b3fc108b70b061d"}
+cluster_preferences_sha256=${CLUSTER_PREFERENCES_SHA256:-"70a9b1d3e54b4b91588a9f47344c0cbd93e5fb89aa9e6681e58b00f29d06f363"}
 
 # try to derive csv_version from docker tag. But it must start with x.y.z, without leading v
 default_csv_version="${docker_tag/latest/0.0.0}"

@@ -9,8 +9,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	v1 "kubevirt.io/api/core/v1"
-
-	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
 )
 
 type CommandFlags struct {
@@ -29,11 +27,11 @@ func (c *CommandFlags) AddToCommand(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&c.Secret, "secret", "", "Name of the secret with SSH keys.")
 }
 
-type SshCommandFlags struct {
+type SSHCommandFlags struct {
 	CommandFlags
 
-	SshPubKeyFile    string
-	SshPubKeyLiteral string
+	SSHPubKeyFile    string
+	SSHPubKeyLiteral string
 }
 
 const (
@@ -41,36 +39,35 @@ const (
 	keyValueFlag = "value"
 )
 
-func (s *SshCommandFlags) AddToCommand(cmd *cobra.Command) {
+func (s *SSHCommandFlags) AddToCommand(cmd *cobra.Command) {
 	s.CommandFlags.AddToCommand(cmd)
 
-	cmd.Flags().StringVarP(&s.SshPubKeyFile, keyFileFlag, "f", "", "Path to the SSH public key file.")
+	cmd.Flags().StringVarP(&s.SSHPubKeyFile, keyFileFlag, "f", "", "Path to the SSH public key file.")
 	err := cmd.MarkFlagFilename(keyFileFlag)
 	if err != nil {
 		panic(err)
 	}
 
-	cmd.Flags().StringVar(&s.SshPubKeyLiteral, keyValueFlag, "", "Literal value of the SSH public key.")
+	cmd.Flags().StringVar(&s.SSHPubKeyLiteral, keyValueFlag, "", "Literal value of the SSH public key.")
 	cmd.MarkFlagsMutuallyExclusive(keyFileFlag, keyValueFlag)
-
 }
 
-func GetSshKey(flags *SshCommandFlags) (string, error) {
-	if flags.SshPubKeyLiteral != "" {
-		return flags.SshPubKeyLiteral, nil
+func GetSSHKey(flags *SSHCommandFlags) (string, error) {
+	if flags.SSHPubKeyLiteral != "" {
+		return flags.SSHPubKeyLiteral, nil
 	}
 
-	if flags.SshPubKeyFile == "" {
+	if flags.SSHPubKeyFile == "" {
 		return "", fmt.Errorf("one of --%s, or --%s must be specified", keyFileFlag, keyValueFlag)
 	}
-	data, err := os.ReadFile(flags.SshPubKeyFile)
+	data, err := os.ReadFile(flags.SSHPubKeyFile)
 	if err != nil {
 		return "", err
 	}
 	return string(data), nil
 }
 
-func GetSshSecretsForUser(accessCredentials []v1.AccessCredential, user string) []string {
+func GetSSHSecretsForUser(accessCredentials []v1.AccessCredential, user string) []string {
 	var result []string
 	for i := range accessCredentials {
 		credential := &accessCredentials[i]
@@ -109,7 +106,7 @@ func FindSecretOrGetFirst(secretName string, secrets []string) (string, error) {
 	return "", fmt.Errorf("secret %s was not assigned", secretName)
 }
 
-func IsOwnedByVm(obj metav1.Object, vm *v1.VirtualMachine) bool {
+func IsOwnedByVM(obj metav1.Object, vm *v1.VirtualMachine) bool {
 	for _, ownerReference := range obj.GetOwnerReferences() {
 		if ownerReference.Kind == v1.VirtualMachineGroupVersionKind.Kind &&
 			ownerReference.Name == vm.Name &&
@@ -129,38 +126,11 @@ func ContainsValue(slice []string, value string) bool {
 	return false
 }
 
-func LineContainsKey(line string, key string) bool {
+func LineContainsKey(line, key string) bool {
 	return strings.HasPrefix(strings.TrimSpace(line), key)
 }
 
-func AddDataFieldToSecretPatchOp() []patch.PatchOperation {
-	return []patch.PatchOperation{{
-		Op:    patch.PatchTestOp,
-		Path:  "/data",
-		Value: nil,
-	}, {
-		Op:    patch.PatchAddOp,
-		Path:  "/data",
-		Value: map[string][]byte{},
-	}}
-}
-
-func AddKeyToSecretPatchOp(keyName string, key []byte) patch.PatchOperation {
-	return patch.PatchOperation{
-		Op:    patch.PatchAddOp,
-		Path:  "/data/" + keyName,
-		Value: key,
-	}
-}
-
-func MustMarshalPatch(patches ...patch.PatchOperation) []byte {
-	data, err := patch.GeneratePatchPayload(patches...)
-	if err != nil {
-		panic(err)
-	}
-	return data
-}
-
 func RandomWithPrefix(prefix string) string {
-	return prefix + rand.String(6)
+	const suffixLength = 6
+	return prefix + rand.String(suffixLength)
 }

@@ -161,6 +161,8 @@ const (
 	CONNECT_LIST_NODE_DEVICES_CAP_VPD           = ConnectListAllNodeDeviceFlags(C.VIR_CONNECT_LIST_NODE_DEVICES_CAP_VPD)
 	CONNECT_LIST_NODE_DEVICES_INACTIVE          = ConnectListAllNodeDeviceFlags(C.VIR_CONNECT_LIST_NODE_DEVICES_INACTIVE)
 	CONNECT_LIST_NODE_DEVICES_ACTIVE            = ConnectListAllNodeDeviceFlags(C.VIR_CONNECT_LIST_NODE_DEVICES_ACTIVE)
+	CONNECT_LIST_NODE_DEVICES_PERSISTENT        = ConnectListAllNodeDeviceFlags(C.VIR_CONNECT_LIST_NODE_DEVICES_PERSISTENT)
+	CONNECT_LIST_NODE_DEVICES_TRANSIENT         = ConnectListAllNodeDeviceFlags(C.VIR_CONNECT_LIST_NODE_DEVICES_TRANSIENT)
 )
 
 type ConnectListAllSecretsFlags uint
@@ -472,6 +474,26 @@ func (c *Connect) Ref() error {
 		return makeError(&err)
 	}
 	return nil
+}
+
+// Return the raw pointer. Caller is responsible for closing it via
+// CloseRawPtr(). This is intended to allow integration with Go bindings
+// to other C APIs that require direct access a virConnectPtr. This should
+// not be used in other scenarios.
+func (c *Connect) RawPtr() (C.virConnectPtr, error) {
+	var err C.virError
+	ret := C.virConnectRefWrapper(c.ptr, &err)
+	if ret == -1 {
+		return nil, makeError(&err)
+	}
+	return c.ptr, nil
+}
+
+// Unref (and possibly close) raw libvirt connection object, previously
+// obtained via RawPtr().
+func CloseRawPtr(c C.virConnectPtr) (int, error) {
+	cc := Connect{ptr: c}
+	return cc.Close()
 }
 
 type CloseCallback func(conn *Connect, reason ConnectCloseReason)
@@ -2407,7 +2429,7 @@ func (c *Connect) FindStoragePoolSources(pooltype string, srcSpec string, flags 
 	defer C.free(unsafe.Pointer(cpooltype))
 	var csrcSpec *C.char
 	if srcSpec != "" {
-		csrcSpec := C.CString(srcSpec)
+		csrcSpec = C.CString(srcSpec)
 		defer C.free(unsafe.Pointer(csrcSpec))
 	}
 	var err C.virError
@@ -3313,7 +3335,7 @@ func (c *Connect) GetAllDomainStats(doms []*Domain, statsTypes DomainStatsTypes,
 	}
 
 	for i := 0; i < len(stats); i++ {
-		ret := C.virDomainRefWrapper(stats[i].Domain.ptr, &err)
+		ret = C.virDomainRefWrapper(stats[i].Domain.ptr, &err)
 		if ret < 0 {
 			return []DomainStats{}, makeError(&err)
 		}

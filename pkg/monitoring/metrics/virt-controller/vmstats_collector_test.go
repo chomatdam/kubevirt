@@ -27,6 +27,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/machadovilaca/operator-observability/pkg/operatormetrics"
+	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	k6tv1 "kubevirt.io/api/core/v1"
@@ -90,5 +92,244 @@ var _ = Describe("VM Stats Collector", func() {
 			Entry("Non running VM", k6tv1.VirtualMachineStatusStopped, nonRunningTimestamp),
 			Entry("Errored VM", k6tv1.VirtualMachineStatusCrashLoopBackOff, errorTimestamp),
 		)
+	})
+
+	Context("VM info", func() {
+		setupTestCollector()
+
+		It("should handle no VMs", func() {
+			cr := CollectVMsInfo([]*k6tv1.VirtualMachine{})
+			Expect(cr).To(BeEmpty())
+		})
+
+		It("should show annotation types correctly", func() {
+			vms := []*k6tv1.VirtualMachine{
+				{
+					Spec: k6tv1.VirtualMachineSpec{
+						Template: &k6tv1.VirtualMachineInstanceTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Annotations: map[string]string{
+									annotationPrefix + "os":       "centos8",
+									annotationPrefix + "workload": "server",
+									annotationPrefix + "flavor":   "tiny",
+									"other":                       "other",
+								},
+							},
+						},
+					},
+					Status: k6tv1.VirtualMachineStatus{
+						PrintableStatus: k6tv1.VirtualMachineStatusCrashLoopBackOff,
+					},
+				},
+				{
+					Spec: k6tv1.VirtualMachineSpec{
+						Template: &k6tv1.VirtualMachineInstanceTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Annotations: map[string]string{
+									annotationPrefix + "os":       "centos8",
+									annotationPrefix + "workload": "server",
+									annotationPrefix + "flavor":   "tiny",
+									annotationPrefix + "phase":    "dummy",
+								},
+							},
+						},
+					},
+					Status: k6tv1.VirtualMachineStatus{
+						PrintableStatus: k6tv1.VirtualMachineStatusCrashLoopBackOff,
+					},
+				},
+			}
+
+			crs := CollectVMsInfo(vms)
+			Expect(crs).To(HaveLen(2), "Expected 2 metrics")
+
+			for i, cr := range crs {
+				Expect(cr).ToNot(BeNil())
+				Expect(cr.Metric.GetOpts().Name).To(ContainSubstring("kubevirt_vm_info"))
+				Expect(cr.Value).To(BeEquivalentTo(1))
+				Expect(cr.Labels).To(HaveLen(9))
+
+				Expect(cr.GetLabelValue("name")).To(Equal(vms[i].ObjectMeta.Name))
+				Expect(cr.GetLabelValue("namespace")).To(Equal(vms[i].ObjectMeta.Namespace))
+
+				os, workload, flavor := getSystemInfoFromAnnotations(vms[i].Spec.Template.ObjectMeta.Annotations)
+				Expect(cr.GetLabelValue("os")).To(Equal(os))
+				Expect(cr.GetLabelValue("workload")).To(Equal(workload))
+				Expect(cr.GetLabelValue("flavor")).To(Equal(flavor))
+
+				Expect(cr.GetLabelValue("status")).To(Equal("CrashLoopBackOff"))
+				Expect(cr.GetLabelValue("status_group")).To(Equal("error"))
+			}
+		})
+
+		DescribeTable("should show instance type value correctly", func(instanceTypeKind string, instanceTypeName string, expected string) {
+			var instanceType *k6tv1.InstancetypeMatcher
+			if instanceTypeName != "" {
+				instanceType = &k6tv1.InstancetypeMatcher{
+					Kind: instanceTypeKind,
+					Name: instanceTypeName,
+				}
+			}
+
+			vms := []*k6tv1.VirtualMachine{{Spec: k6tv1.VirtualMachineSpec{Instancetype: instanceType}}}
+			crs := CollectVMsInfo(vms)
+			Expect(crs).To(HaveLen(1), "Expected 1 metric")
+
+			cr := crs[0]
+			Expect(cr).ToNot(BeNil())
+			Expect(cr.Metric.GetOpts().Name).To(ContainSubstring("kubevirt_vm_info"))
+			Expect(cr.Value).To(BeEquivalentTo(1))
+			Expect(cr.Labels).To(HaveLen(9))
+			Expect(cr.GetLabelValue("instance_type")).To(Equal(expected))
+		},
+			Entry("with no instance type expect <none>", "VirtualMachineInstancetype", "", "<none>"),
+			Entry("with managed instance type expect its name", "VirtualMachineInstancetype", "i-managed", "i-managed"),
+			Entry("with custom instance type expect <other>", "VirtualMachineInstancetype", "i-unmanaged", "<other>"),
+			Entry("with no cluster instance type expect <none>", "VirtualMachineClusterInstancetype", "", "<none>"),
+			Entry("with managed cluster instance type expect its name", "VirtualMachineClusterInstancetype", "ci-managed", "ci-managed"),
+			Entry("with custom cluster instance type expect <other>", "VirtualMachineClusterInstancetype", "ci-unmanaged", "<other>"),
+		)
+
+		DescribeTable("should show preference value correctly", func(preferenceAnnotationKey string, preferenceName string, expected string) {
+			var preference *k6tv1.PreferenceMatcher
+			if preferenceName != "" {
+				preference = &k6tv1.PreferenceMatcher{
+					Kind: preferenceAnnotationKey,
+					Name: preferenceName,
+				}
+			}
+
+			vms := []*k6tv1.VirtualMachine{{Spec: k6tv1.VirtualMachineSpec{Preference: preference}}}
+			crs := CollectVMsInfo(vms)
+			Expect(crs).To(HaveLen(1), "Expected 1 metric")
+
+			cr := crs[0]
+
+			Expect(cr.Metric.GetOpts().Name).To(ContainSubstring("kubevirt_vm_info"))
+			Expect(cr.Value).To(BeEquivalentTo(1))
+			Expect(cr.Labels).To(HaveLen(9))
+			Expect(cr.GetLabelValue("preference")).To(Equal(expected))
+		},
+			Entry("with no preference expect <none>", "VirtualMachinePreference", "", "<none>"),
+			Entry("with managed preference expect its name", "VirtualMachinePreference", "p-managed", "p-managed"),
+			Entry("with custom preference expect <other>", "VirtualMachinePreference", "p-unmanaged", "<other>"),
+			Entry("with no cluster preference expect <none>", "VirtualMachineClusterPreference", "", "<none>"),
+			Entry("with managed cluster preference expect its name", "VirtualMachineClusterPreference", "cp-managed", "cp-managed"),
+			Entry("with custom cluster preference expect <other>", "VirtualMachineClusterPreference", "cp-unmanaged", "<other>"),
+		)
+	})
+
+	Context("VM Resource Requests", func() {
+		It("should ignore VM with empty memory resource requests", func() {
+			vm := &k6tv1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns",
+					Name:      "testvm",
+				},
+				Spec: k6tv1.VirtualMachineSpec{
+					Template: &k6tv1.VirtualMachineInstanceTemplateSpec{
+						Spec: k6tv1.VirtualMachineInstanceSpec{
+							Domain: k6tv1.DomainSpec{},
+						},
+					},
+				},
+			}
+
+			cr := CollectResourceRequests([]*k6tv1.VirtualMachine{vm})
+			Expect(cr).To(BeZero())
+		})
+
+		It("should collect VM memory resource requests", func() {
+			vm := &k6tv1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns",
+					Name:      "testvm",
+				},
+				Spec: k6tv1.VirtualMachineSpec{
+					Template: &k6tv1.VirtualMachineInstanceTemplateSpec{
+						Spec: k6tv1.VirtualMachineInstanceSpec{
+							Domain: k6tv1.DomainSpec{
+								Resources: k6tv1.ResourceRequirements{
+									Requests: k8sv1.ResourceList{
+										k8sv1.ResourceMemory: *resource.NewQuantity(1024, resource.BinarySI),
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			crs := CollectResourceRequests([]*k6tv1.VirtualMachine{vm})
+			Expect(crs).To(HaveLen(1))
+			Expect(crs[0].Metric.GetOpts().Name).To(ContainSubstring("kubevirt_vm_resource_requests"))
+			Expect(crs[0].Value).To(BeEquivalentTo(1024))
+			Expect(crs[0].Labels).To(Equal([]string{"testvm", "test-ns", "memory", "bytes"}))
+		})
+
+		It("should collect VM CPU resource requests", func() {
+			vm := &k6tv1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns",
+					Name:      "testvm",
+				},
+				Spec: k6tv1.VirtualMachineSpec{
+					Template: &k6tv1.VirtualMachineInstanceTemplateSpec{
+						Spec: k6tv1.VirtualMachineInstanceSpec{
+							Domain: k6tv1.DomainSpec{
+								Resources: k6tv1.ResourceRequirements{
+									Requests: k8sv1.ResourceList{
+										k8sv1.ResourceCPU: *resource.NewMilliQuantity(500, resource.BinarySI),
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			crs := CollectResourceRequests([]*k6tv1.VirtualMachine{vm})
+			Expect(crs).To(HaveLen(1), "Expected 1 metric")
+			Expect(crs[0].Metric.GetOpts().Name).To(ContainSubstring("kubevirt_vm_resource_requests"))
+			Expect(crs[0].Value).To(BeEquivalentTo(0.5))
+			Expect(crs[0].Labels).To(Equal([]string{"testvm", "test-ns", "cpu", "cores"}))
+		})
+
+		It("should collect VM CPU resource requests from domain", func() {
+			vm := &k6tv1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns",
+					Name:      "testvm",
+				},
+				Spec: k6tv1.VirtualMachineSpec{
+					Template: &k6tv1.VirtualMachineInstanceTemplateSpec{
+						Spec: k6tv1.VirtualMachineInstanceSpec{
+							Domain: k6tv1.DomainSpec{
+								CPU: &k6tv1.CPU{
+									Cores:   2,
+									Threads: 4,
+									Sockets: 1,
+								},
+							},
+						},
+					},
+				},
+			}
+
+			crs := CollectResourceRequests([]*k6tv1.VirtualMachine{vm})
+			Expect(crs).To(HaveLen(3), "Expected 1 metric")
+
+			Expect(crs[0].Metric.GetOpts().Name).To(ContainSubstring("kubevirt_vm_resource_requests"))
+			Expect(crs[0].Value).To(BeEquivalentTo(2))
+			Expect(crs[0].Labels).To(Equal([]string{"testvm", "test-ns", "cpu", "cores"}))
+
+			Expect(crs[1].Metric.GetOpts().Name).To(ContainSubstring("kubevirt_vm_resource_requests"))
+			Expect(crs[1].Value).To(BeEquivalentTo(4))
+			Expect(crs[1].Labels).To(Equal([]string{"testvm", "test-ns", "cpu", "threads"}))
+
+			Expect(crs[2].Metric.GetOpts().Name).To(ContainSubstring("kubevirt_vm_resource_requests"))
+			Expect(crs[2].Value).To(BeEquivalentTo(1))
+			Expect(crs[2].Labels).To(Equal([]string{"testvm", "test-ns", "cpu", "sockets"}))
+		})
 	})
 })

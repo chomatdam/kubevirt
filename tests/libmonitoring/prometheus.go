@@ -26,11 +26,13 @@ import (
 
 	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/pkg/monitoring/metrics/testing"
+
 	"kubevirt.io/kubevirt/tests/clientcmd"
 	execute "kubevirt.io/kubevirt/tests/exec"
 	"kubevirt.io/kubevirt/tests/flags"
 	"kubevirt.io/kubevirt/tests/framework/checks"
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 type AlertRequestResult struct {
@@ -44,13 +46,8 @@ type QueryRequestResult struct {
 }
 
 type promData struct {
-	ResultType string       `json:"resultType"`
-	Result     []promResult `json:"result"`
-}
-
-type promResult struct {
-	Metric map[string]string `json:"metric"`
-	Value  []interface{}     `json:"value"`
+	ResultType string               `json:"resultType"`
+	Result     []testing.PromResult `json:"result"`
 }
 
 func GetAlerts(cli kubecli.KubevirtClient) ([]prometheusv1.Alert, error) {
@@ -81,6 +78,16 @@ func WaitForMetricValueWithLabels(client kubecli.KubevirtClient, metric string, 
 		}
 		return i
 	}, 3*time.Minute, 1*time.Second).Should(BeNumerically("==", expectedValue))
+}
+
+func WaitForMetricValueWithLabelsToBe(client kubecli.KubevirtClient, metric string, labels map[string]string, offset int, comparator string, expectedValue float64) {
+	EventuallyWithOffset(offset, func() float64 {
+		i, err := GetMetricValueWithLabels(client, metric, labels)
+		if err != nil {
+			return -1
+		}
+		return i
+	}, 3*time.Minute, 1*time.Second).Should(BeNumerically(comparator, expectedValue))
 }
 
 func GetMetricValueWithLabels(cli kubecli.KubevirtClient, query string, labels map[string]string) (float64, error) {
@@ -120,7 +127,7 @@ func findMetricWithLabels(result *QueryRequestResult, labels map[string]string) 
 	return nil
 }
 
-func labelsMatch(pr promResult, labels map[string]string) bool {
+func labelsMatch(pr testing.PromResult, labels map[string]string) bool {
 	for k, v := range labels {
 		if pr.Metric[k] != v {
 			return false
@@ -132,6 +139,22 @@ func labelsMatch(pr promResult, labels map[string]string) bool {
 
 func fetchMetric(cli kubecli.KubevirtClient, query string) (*QueryRequestResult, error) {
 	bodyBytes := DoPrometheusHTTPRequest(cli, fmt.Sprintf("/query?query=%s", query))
+
+	var result QueryRequestResult
+	err := json.Unmarshal(bodyBytes, &result)
+	if err != nil {
+		return nil, err
+	}
+
+	if result.Status != "success" {
+		return nil, fmt.Errorf("api request failed. result: %v", result)
+	}
+
+	return &result, nil
+}
+
+func QueryRange(cli kubecli.KubevirtClient, query string, start time.Time, end time.Time, step time.Duration) (*QueryRequestResult, error) {
+	bodyBytes := DoPrometheusHTTPRequest(cli, fmt.Sprintf("/query_range?query=%s&start=%d&end=%d&step=%d", query, start.Unix(), end.Unix(), int(step.Seconds())))
 
 	var result QueryRequestResult
 	err := json.Unmarshal(bodyBytes, &result)
@@ -194,7 +217,7 @@ func getPrometheusURLForOpenShift() string {
 	Eventually(func() error {
 		var stderr string
 		var err error
-		host, stderr, err = clientcmd.RunCommand(clientcmd.GetK8sCmdClient(), "-n", "openshift-monitoring", "get", "route", "prometheus-k8s", "--template", "{{.spec.host}}")
+		host, stderr, err = clientcmd.RunCommand(testsuite.GetTestNamespace(nil), clientcmd.GetK8sCmdClient(), "-n", "openshift-monitoring", "get", "route", "prometheus-k8s", "--template", "{{.spec.host}}")
 		if err != nil {
 			return fmt.Errorf("error while getting route. err:'%v', stderr:'%v'", err, stderr)
 		}
@@ -395,7 +418,7 @@ func getPrometheusAlerts(virtClient kubecli.KubevirtClient) promv1.PrometheusRul
 
 func GetKubevirtVMMetrics(pod *k8sv1.Pod, ip string) string {
 	metricsURL := PrepareMetricsURL(ip, 8443)
-	stdout, _, err := execute.ExecuteCommandOnPodWithResults(kubevirt.Client(),
+	stdout, _, err := execute.ExecuteCommandOnPodWithResults(
 		pod,
 		"virt-handler",
 		[]string{

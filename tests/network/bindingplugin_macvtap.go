@@ -28,23 +28,23 @@ import (
 	. "github.com/onsi/gomega"
 
 	k8sv1 "k8s.io/api/core/v1"
-	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/libvmi"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-
-	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/framework/checks"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-	"kubevirt.io/kubevirt/tests/libkvconfig"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
 	"kubevirt.io/kubevirt/tests/libmigration"
 	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/libnode"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libpod"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
 	"kubevirt.io/kubevirt/tests/testsuite"
 )
@@ -56,12 +56,12 @@ var _ = SIGDescribe("VirtualMachineInstance with macvtap network binding plugin"
 	)
 
 	BeforeEach(func() {
-		tests.EnableFeatureGate(virtconfig.NetworkBindingPlugingsGate)
+		config.EnableFeatureGate(virtconfig.NetworkBindingPlugingsGate)
 	})
 
 	BeforeEach(func() {
 		const macvtapBindingName = "macvtap"
-		err := libkvconfig.WithNetBindingPlugin(macvtapBindingName, v1.InterfaceBindingPlugin{
+		err := config.WithNetBindingPlugin(macvtapBindingName, v1.InterfaceBindingPlugin{
 			DomainAttachmentType: v1.Tap,
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -75,10 +75,10 @@ var _ = SIGDescribe("VirtualMachineInstance with macvtap network binding plugin"
 
 	var serverMAC, clientMAC string
 	BeforeEach(func() {
-		mac, err := GenerateRandomMac()
+		mac, err := libnet.GenerateRandomMac()
 		serverMAC = mac.String()
 		Expect(err).NotTo(HaveOccurred())
-		mac, err = GenerateRandomMac()
+		mac, err = libnet.GenerateRandomMac()
 		Expect(err).NotTo(HaveOccurred())
 		clientMAC = mac.String()
 	})
@@ -99,14 +99,14 @@ var _ = SIGDescribe("VirtualMachineInstance with macvtap network binding plugin"
 			libvmi.WithNetwork(libvmi.MultusNetwork(macvtapNetworkName, macvtapNetworkName)),
 			libvmi.WithNodeAffinityFor(nodeName),
 		}
-		serverVMI := libvmi.NewAlpineWithTestTooling(opts...)
-		clientVMI := libvmi.NewAlpineWithTestTooling(opts...)
+		serverVMI := libvmifact.NewAlpineWithTestTooling(opts...)
+		clientVMI := libvmifact.NewAlpineWithTestTooling(opts...)
 
 		var err error
 		ns := testsuite.GetTestNamespace(nil)
-		serverVMI, err = kubevirt.Client().VirtualMachineInstance(ns).Create(context.Background(), serverVMI)
+		serverVMI, err = kubevirt.Client().VirtualMachineInstance(ns).Create(context.Background(), serverVMI, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
-		clientVMI, err = kubevirt.Client().VirtualMachineInstance(ns).Create(context.Background(), clientVMI)
+		clientVMI, err = kubevirt.Client().VirtualMachineInstance(ns).Create(context.Background(), clientVMI, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		serverVMI = libwait.WaitUntilVMIReady(serverVMI, console.LoginToAlpine)
@@ -124,13 +124,13 @@ var _ = SIGDescribe("VirtualMachineInstance with macvtap network binding plugin"
 		BeforeEach(checks.SkipIfMigrationIsNotPossible)
 
 		BeforeEach(func() {
-			clientVMI = libvmi.NewAlpineWithTestTooling(
+			clientVMI = libvmifact.NewAlpineWithTestTooling(
 				libvmi.WithInterface(*libvmi.InterfaceWithMac(
 					libvmi.InterfaceWithMacvtapBindingPlugin("test"), clientMAC)),
 				libvmi.WithNetwork(libvmi.MultusNetwork("test", macvtapNetworkName)),
 			)
 			var err error
-			clientVMI, err = kubevirt.Client().VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Create(context.Background(), clientVMI)
+			clientVMI, err = kubevirt.Client().VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Create(context.Background(), clientVMI, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred(), "should create VMI successfully")
 			clientVMI = libwait.WaitUntilVMIReady(clientVMI, console.LoginToAlpine)
 		})
@@ -149,13 +149,12 @@ var _ = SIGDescribe("VirtualMachineInstance with macvtap network binding plugin"
 
 		Context("with live traffic", func() {
 			var serverVMI *v1.VirtualMachineInstance
-			var serverVMIPodName string
 			var serverIP string
 
 			const macvtapIfaceIPReportTimeout = 4 * time.Minute
 
 			BeforeEach(func() {
-				serverVMI = libvmi.NewFedora(
+				serverVMI = libvmifact.NewFedora(
 					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 					libvmi.WithInterface(*libvmi.InterfaceWithMac(
 						libvmi.InterfaceWithMacvtapBindingPlugin(macvtapNetworkName), serverMAC)),
@@ -163,12 +162,11 @@ var _ = SIGDescribe("VirtualMachineInstance with macvtap network binding plugin"
 					libvmi.WithNetwork(libvmi.MultusNetwork(macvtapNetworkName, macvtapNetworkName)),
 				)
 				var err error
-				serverVMI, err = kubevirt.Client().VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Create(context.Background(), serverVMI)
+				serverVMI, err = kubevirt.Client().VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Create(context.Background(), serverVMI, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred(), "should create VMI successfully")
 				serverVMI = libwait.WaitUntilVMIReady(serverVMI, console.LoginToFedora)
 
 				Expect(serverVMI.Status.Interfaces).NotTo(BeEmpty(), "a migrate-able VMI must have network interfaces")
-				serverVMIPodName = tests.GetVmPodName(kubevirt.Client(), serverVMI)
 
 				serverIP, err = waitVMMacvtapIfaceIPReport(serverVMI, serverMAC, macvtapIfaceIPReportTimeout)
 				Expect(err).NotTo(HaveOccurred(), "should have managed to figure out the IP of the server VMI")
@@ -182,13 +180,15 @@ var _ = SIGDescribe("VirtualMachineInstance with macvtap network binding plugin"
 
 			It("should keep connectivity after a migration", func() {
 				const containerCompletionWaitTime = 60
+				serverVmiPod, err := libpod.GetPodByVirtualMachineInstance(serverVMI, testsuite.GetTestNamespace(nil))
+				Expect(err).ToNot(HaveOccurred())
 				migration := libmigration.New(serverVMI.Name, serverVMI.GetNamespace())
 				_ = libmigration.RunMigrationAndExpectToCompleteWithDefaultTimeout(kubevirt.Client(), migration)
 				// In case of clientVMI and serverVMI running on the same node before migration, the serverVMI
 				// will be reachable only when the original launcher pod terminates.
 				Eventually(func() error {
-					return waitForPodCompleted(serverVMI.Namespace, serverVMIPodName)
-				}, containerCompletionWaitTime, time.Second).Should(Succeed(), fmt.Sprintf("all containers should complete in source virt-launcher pod: %s", serverVMIPodName))
+					return waitForPodCompleted(serverVMI.Namespace, serverVmiPod.Name)
+				}, containerCompletionWaitTime, time.Second).Should(Succeed(), fmt.Sprintf("all containers should complete in source virt-launcher pod: %s", serverVMI.Name))
 				Expect(libnet.PingFromVMConsole(clientVMI, serverIP)).To(Succeed(), "connectivity is expected *after* migrating the VMI")
 			})
 		})
@@ -196,7 +196,7 @@ var _ = SIGDescribe("VirtualMachineInstance with macvtap network binding plugin"
 })
 
 func waitForPodCompleted(podNamespace string, podName string) error {
-	pod, err := kubevirt.Client().CoreV1().Pods(podNamespace).Get(context.Background(), podName, k8smetav1.GetOptions{})
+	pod, err := kubevirt.Client().CoreV1().Pods(podNamespace).Get(context.Background(), podName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -209,7 +209,7 @@ func waitForPodCompleted(podNamespace string, podName string) error {
 func waitVMMacvtapIfaceIPReport(vmi *v1.VirtualMachineInstance, macAddress string, timeout time.Duration) (string, error) {
 	var vmiIP string
 	err := wait.PollImmediate(time.Second, timeout, func() (done bool, err error) {
-		vmi, err := kubevirt.Client().VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &k8smetav1.GetOptions{})
+		vmi, err := kubevirt.Client().VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}

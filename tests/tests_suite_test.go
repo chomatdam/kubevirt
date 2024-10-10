@@ -29,8 +29,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	ginkgo_reporters "github.com/onsi/ginkgo/v2/reporters"
 
-	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
 	"kubevirt.io/kubevirt/tests/libnode"
 	"kubevirt.io/kubevirt/tests/reporter"
 	"kubevirt.io/kubevirt/tests/testsuite"
@@ -46,6 +46,7 @@ import (
 	_ "kubevirt.io/kubevirt/tests/guestlog"
 	_ "kubevirt.io/kubevirt/tests/hotplug"
 	_ "kubevirt.io/kubevirt/tests/infrastructure"
+	_ "kubevirt.io/kubevirt/tests/instancetype"
 	_ "kubevirt.io/kubevirt/tests/launchsecurity"
 	_ "kubevirt.io/kubevirt/tests/migration"
 	_ "kubevirt.io/kubevirt/tests/monitoring"
@@ -57,6 +58,7 @@ import (
 	_ "kubevirt.io/kubevirt/tests/scale"
 	_ "kubevirt.io/kubevirt/tests/storage"
 	_ "kubevirt.io/kubevirt/tests/usb"
+	_ "kubevirt.io/kubevirt/tests/validatingadmissionpolicy"
 	_ "kubevirt.io/kubevirt/tests/virtctl"
 	_ "kubevirt.io/kubevirt/tests/virtiofs"
 )
@@ -77,7 +79,6 @@ func TestTests(t *testing.T) {
 	suiteConfig, _ := GinkgoConfiguration()
 	if suiteConfig.ParallelTotal > 1 {
 		artifactsPath = filepath.Join(artifactsPath, strconv.Itoa(GinkgoParallelProcess()))
-		junitOutput = filepath.Join(flags.ArtifactsDir, fmt.Sprintf("partial.junit.functest.%d.xml", GinkgoParallelProcess()))
 	}
 
 	outputEnricherReporter := reporter.NewCapturedOutputEnricher(
@@ -86,9 +87,6 @@ func TestTests(t *testing.T) {
 	afterSuiteReporters = append(afterSuiteReporters, outputEnricherReporter)
 
 	if qe_reporters.Polarion.Run {
-		if suiteConfig.ParallelTotal > 1 {
-			qe_reporters.Polarion.Filename = filepath.Join(flags.ArtifactsDir, fmt.Sprintf("partial.polarion.functest.%d.xml", GinkgoParallelProcess()))
-		}
 		afterSuiteReporters = append(afterSuiteReporters, &qe_reporters.Polarion)
 	}
 
@@ -138,7 +136,14 @@ var _ = ReportAfterSuite("TestTests", func(report Report) {
 	}
 })
 
+var _ = ReportBeforeSuite(func(report Report) {
+	k8sReporter.ConfigurePerSpecReporting(report)
+})
+
 var _ = JustAfterEach(func() {
+	if flags.DeployFakeKWOKNodesFlag {
+		return
+	}
 	k8sReporter.ReportSpec(CurrentSpecReport())
 })
 
@@ -160,5 +165,5 @@ func resetToDefaultConfig() {
 		// we can just skip the restore step.
 		return
 	}
-	tests.UpdateKubeVirtConfigValueAndWait(testsuite.KubeVirtDefaultConfig)
+	config.UpdateKubeVirtConfigValueAndWait(testsuite.KubeVirtDefaultConfig)
 }

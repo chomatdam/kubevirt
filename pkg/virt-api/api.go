@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	builderv3 "k8s.io/kube-openapi/pkg/builder3"
 	"k8s.io/kube-openapi/pkg/common/restfuladapter"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
@@ -45,7 +46,6 @@ import (
 	certificate2 "k8s.io/client-go/util/certificate"
 	"k8s.io/client-go/util/flowcontrol"
 	aggregatorclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
-	builderv3 "k8s.io/kube-openapi/pkg/builder3"
 
 	"kubevirt.io/kubevirt/pkg/util/ratelimiter"
 
@@ -60,6 +60,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/healthz"
+	clientmetrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/common/client"
 	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-api"
 	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
 	mime "kubevirt.io/kubevirt/pkg/rest"
@@ -137,6 +138,8 @@ type virtAPIApp struct {
 	hasCDIDataSource bool
 	// the channel used to trigger re-initialization.
 	reInitChan chan string
+
+	kubeVirtServiceAccounts map[string]struct{}
 }
 
 var (
@@ -154,9 +157,14 @@ func NewVirtApi() VirtApi {
 }
 
 func (app *virtAPIApp) Execute() {
+	if err := metrics.SetupMetrics(); err != nil {
+		panic(err)
+	}
+
 	app.reloadableRateLimiter = ratelimiter.NewReloadableRateLimiter(flowcontrol.NewTokenBucketRateLimiter(virtconfig.DefaultVirtAPIQPS, virtconfig.DefaultVirtAPIBurst))
 	app.reloadableWebhookRateLimiter = ratelimiter.NewReloadableRateLimiter(flowcontrol.NewTokenBucketRateLimiter(virtconfig.DefaultVirtWebhookClientQPS, virtconfig.DefaultVirtWebhookClientBurst))
 
+	clientmetrics.RegisterRestConfigHooks()
 	clientConfig, err := kubecli.GetKubevirtClientConfig()
 	if err != nil {
 		panic(err)
@@ -185,14 +193,10 @@ func (app *virtAPIApp) Execute() {
 		panic(err)
 	}
 
+	app.kubeVirtServiceAccounts = webhooks.KubeVirtServiceAccounts(app.namespace)
+
 	app.ConfigureOpenAPIService()
 	app.reInitChan = make(chan string, 10)
-
-	// setup monitoring
-	err = metrics.SetupMetrics()
-	if err != nil {
-		panic(err)
-	}
 
 	app.Run()
 }
@@ -782,7 +786,7 @@ func (app *virtAPIApp) Compose() {
 }
 
 func (app *virtAPIApp) ConfigureOpenAPIService() {
-	config := openapi.CreateConfig()
+	config := openapi.CreateV3Config()
 	config.GetDefinitions = v12.GetOpenAPIDefinitions
 	spec, err := builderv3.BuildOpenAPISpecFromRoutes(restfuladapter.AdaptWebServices(restful.RegisteredWebServices()), config)
 	if err != nil {
@@ -868,7 +872,7 @@ func (app *virtAPIApp) registerValidatingWebhooks(informers *webhooks.Informers)
 		validating_webhook.ServeVMICreate(w, r, app.clusterConfig)
 	})
 	http.HandleFunc(components.VMIUpdateValidatePath, func(w http.ResponseWriter, r *http.Request) {
-		validating_webhook.ServeVMIUpdate(w, r, app.clusterConfig)
+		validating_webhook.ServeVMIUpdate(w, r, app.clusterConfig, app.kubeVirtServiceAccounts)
 	})
 	http.HandleFunc(components.VMValidatePath, func(w http.ResponseWriter, r *http.Request) {
 		validating_webhook.ServeVMs(w, r, app.clusterConfig, app.virtCli, informers)
@@ -883,7 +887,7 @@ func (app *virtAPIApp) registerValidatingWebhooks(informers *webhooks.Informers)
 		validating_webhook.ServeVMIPreset(w, r)
 	})
 	http.HandleFunc(components.MigrationCreateValidatePath, func(w http.ResponseWriter, r *http.Request) {
-		validating_webhook.ServeMigrationCreate(w, r, app.clusterConfig, app.virtCli)
+		validating_webhook.ServeMigrationCreate(w, r, app.virtCli)
 	})
 	http.HandleFunc(components.MigrationUpdateValidatePath, func(w http.ResponseWriter, r *http.Request) {
 		validating_webhook.ServeMigrationUpdate(w, r)
@@ -898,16 +902,16 @@ func (app *virtAPIApp) registerValidatingWebhooks(informers *webhooks.Informers)
 		validating_webhook.ServeVMExports(w, r, app.clusterConfig)
 	})
 	http.HandleFunc(components.VMInstancetypeValidatePath, func(w http.ResponseWriter, r *http.Request) {
-		validating_webhook.ServeVmInstancetypes(w, r, app.clusterConfig, app.virtCli)
+		validating_webhook.ServeVmInstancetypes(w, r)
 	})
 	http.HandleFunc(components.VMClusterInstancetypeValidatePath, func(w http.ResponseWriter, r *http.Request) {
-		validating_webhook.ServeVmClusterInstancetypes(w, r, app.clusterConfig, app.virtCli)
+		validating_webhook.ServeVmClusterInstancetypes(w, r)
 	})
 	http.HandleFunc(components.VMPreferenceValidatePath, func(w http.ResponseWriter, r *http.Request) {
-		validating_webhook.ServeVmPreferences(w, r, app.clusterConfig, app.virtCli)
+		validating_webhook.ServeVmPreferences(w, r)
 	})
 	http.HandleFunc(components.VMClusterPreferenceValidatePath, func(w http.ResponseWriter, r *http.Request) {
-		validating_webhook.ServeVmClusterPreferences(w, r, app.clusterConfig, app.virtCli)
+		validating_webhook.ServeVmClusterPreferences(w, r)
 	})
 	http.HandleFunc(components.StatusValidatePath, func(w http.ResponseWriter, r *http.Request) {
 		validating_webhook.ServeStatusValidation(w, r, app.clusterConfig, app.virtCli, informers)
@@ -916,7 +920,7 @@ func (app *virtAPIApp) registerValidatingWebhooks(informers *webhooks.Informers)
 		validating_webhook.ServePodEvictionInterceptor(w, r, app.clusterConfig, app.virtCli)
 	})
 	http.HandleFunc(components.MigrationPolicyCreateValidatePath, func(w http.ResponseWriter, r *http.Request) {
-		validating_webhook.ServeMigrationPolicies(w, r, app.clusterConfig, app.virtCli)
+		validating_webhook.ServeMigrationPolicies(w, r)
 	})
 	http.HandleFunc(components.VMCloneCreateValidatePath, func(w http.ResponseWriter, r *http.Request) {
 		validating_webhook.ServeVirtualMachineClones(w, r, app.clusterConfig, app.virtCli)
@@ -929,7 +933,7 @@ func (app *virtAPIApp) registerMutatingWebhook(informers *webhooks.Informers) {
 		mutating_webhook.ServeVMs(w, r, app.clusterConfig, app.virtCli)
 	})
 	http.HandleFunc(components.VMIMutatePath, func(w http.ResponseWriter, r *http.Request) {
-		mutating_webhook.ServeVMIs(w, r, app.clusterConfig, informers)
+		mutating_webhook.ServeVMIs(w, r, app.clusterConfig, informers, app.kubeVirtServiceAccounts)
 	})
 	http.HandleFunc(components.MigrationMutatePath, func(w http.ResponseWriter, r *http.Request) {
 		mutating_webhook.ServeMigrationCreate(w, r)
@@ -1085,13 +1089,16 @@ func (app *virtAPIApp) Run() {
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeRateLimiter)
 
 	var dataSourceInformer cache.SharedIndexInformer
+	var dataVolumeInformer cache.SharedIndexInformer
 	if app.hasCDIDataSource {
+		dataVolumeInformer = kubeInformerFactory.DataVolume()
 		dataSourceInformer = kubeInformerFactory.DataSource()
-		log.Log.Infof("CDI detected, DataSource integration enabled")
+		log.Log.Infof("CDI detected, DataVolume/DataSource integration enabled")
 	} else {
 		// Add a dummy DataSource informer in the event datasource support
 		// is disabled. This lets the controller continue to work without
 		// requiring a separate branching code path.
+		dataVolumeInformer = kubeInformerFactory.DummyDataVolume()
 		dataSourceInformer = kubeInformerFactory.DummyDataSource()
 		log.Log.Infof("CDI not detected, DataSource integration disabled")
 	}
@@ -1105,6 +1112,7 @@ func (app *virtAPIApp) Run() {
 	webhookInformers := &webhooks.Informers{
 		VMIPresetInformer:  vmiPresetInformer,
 		VMRestoreInformer:  vmRestoreInformer,
+		DataVolumeInformer: dataVolumeInformer,
 		DataSourceInformer: dataSourceInformer,
 		NamespaceInformer:  namespaceInformer,
 	}

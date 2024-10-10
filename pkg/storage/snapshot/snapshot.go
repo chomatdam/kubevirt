@@ -33,11 +33,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kubevirtv1 "kubevirt.io/api/core/v1"
-	snapshotv1 "kubevirt.io/api/snapshot/v1alpha1"
+	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/log"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	"kubevirt.io/kubevirt/pkg/controller"
+	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-controller"
 )
 
 const (
@@ -92,7 +93,7 @@ func vmSnapshotSucceeded(vmSnapshot *snapshotv1.VirtualMachineSnapshot) bool {
 }
 
 func vmSnapshotProgressing(vmSnapshot *snapshotv1.VirtualMachineSnapshot) bool {
-	return !VmSnapshotReady(vmSnapshot) && !vmSnapshotFailed(vmSnapshot) && !vmSnapshotSucceeded(vmSnapshot)
+	return !vmSnapshotFailed(vmSnapshot) && !vmSnapshotSucceeded(vmSnapshot)
 }
 
 func deleteContentPolicy(vmSnapshot *snapshotv1.VirtualMachineSnapshot) bool {
@@ -169,10 +170,12 @@ func (ctrl *VMSnapshotController) updateVMSnapshot(vmSnapshot *snapshotv1.Virtua
 		return 0, err
 	}
 
+	terminating := vmSnapshotTerminating(vmSnapshot)
+
 	// Make sure status is initialized before doing anything
 	if vmSnapshot.Status != nil {
 		if source != nil {
-			if vmSnapshotProgressing(vmSnapshot) && !vmSnapshotTerminating(vmSnapshot) {
+			if vmSnapshotProgressing(vmSnapshot) && !terminating {
 				// attempt to lock source
 				// if fails will attempt again when source is updated
 				if !source.Locked() {
@@ -200,7 +203,7 @@ func (ctrl *VMSnapshotController) updateVMSnapshot(vmSnapshot *snapshotv1.Virtua
 		}
 	}
 
-	if vmSnapshotTerminating(vmSnapshot) && content != nil {
+	if terminating && content != nil {
 		// Delete content if that's the policy or if the snapshot
 		// is marked to be deleted and the content is not ready yet
 		// - no point of keeping an unready content
@@ -216,7 +219,7 @@ func (ctrl *VMSnapshotController) updateVMSnapshot(vmSnapshot *snapshotv1.Virtua
 		}
 	}
 
-	if err = ctrl.updateSnapshotStatus(vmSnapshot, source); err != nil {
+	if err = ctrl.updateSnapshotStatus(vmSnapshot, content, source); err != nil {
 		return 0, err
 	}
 
@@ -273,7 +276,8 @@ func (ctrl *VMSnapshotController) updateVMSnapshotContent(content *snapshotv1.Vi
 	if vmSnapshot == nil || vmSnapshotTerminating(vmSnapshot) {
 		err = ctrl.unfreezeSource(vmSnapshot)
 		if err != nil {
-			return 0, err
+			log.Log.Warningf("Failed to unfreeze source for snapshot content %s/%s: %+v",
+				content.Namespace, content.Name, err)
 		}
 		err = ctrl.removeContentFinalizer(content)
 		if err != nil {
@@ -627,6 +631,8 @@ func (ctrl *VMSnapshotController) getSnapshotPVC(namespace, volumeName string) (
 		return pvc, nil
 	}
 
+	log.Log.Warningf("No VolumeSnapshotClass for %s", *pvc.Spec.StorageClassName)
+
 	return nil, nil
 }
 
@@ -647,7 +653,7 @@ func (ctrl *VMSnapshotController) getVolumeSnapshotClass(storageClassName string
 	}
 
 	if len(matches) == 0 {
-		log.Log.Warningf("No VolumeSnapshotClass for %s", storageClassName)
+		log.Log.V(3).Infof("No VolumeSnapshotClass for %s", storageClassName)
 		return "", nil
 	}
 
@@ -666,7 +672,7 @@ func (ctrl *VMSnapshotController) getVolumeSnapshotClass(storageClassName string
 	return "", fmt.Errorf("%d matching VolumeSnapshotClasses for %s", len(matches), storageClassName)
 }
 
-func (ctrl *VMSnapshotController) updateSnapshotStatus(vmSnapshot *snapshotv1.VirtualMachineSnapshot, source snapshotSource) error {
+func (ctrl *VMSnapshotController) updateSnapshotStatus(vmSnapshot *snapshotv1.VirtualMachineSnapshot, content *snapshotv1.VirtualMachineSnapshotContent, source snapshotSource) error {
 	f := false
 	vmSnapshotCpy := vmSnapshot.DeepCopy()
 	if vmSnapshotCpy.Status == nil {
@@ -675,43 +681,35 @@ func (ctrl *VMSnapshotController) updateSnapshotStatus(vmSnapshot *snapshotv1.Vi
 		}
 	}
 
+	canRemoveFinalizer := true
 	if source != nil {
 		uid := source.UID()
 		vmSnapshotCpy.Status.SourceUID = &uid
+		canRemoveFinalizer = !source.Locked()
 	}
 
-	content, err := ctrl.getContent(vmSnapshot)
-	if err != nil {
-		return err
+	if content != nil && content.Status != nil {
+		// content exists and is initialized
+		vmSnapshotCpy.Status.VirtualMachineSnapshotContentName = &content.Name
+		vmSnapshotCpy.Status.CreationTime = content.Status.CreationTime
+		vmSnapshotCpy.Status.ReadyToUse = content.Status.ReadyToUse
+		vmSnapshotCpy.Status.Error = content.Status.Error
 	}
 
-	if vmSnapshotDeleting(vmSnapshotCpy) {
-		// Enable the vmsnapshot to be deleted only in case it completed
-		// or after waiting until the content is deleted if needed
-		if !vmSnapshotProgressing(vmSnapshot) || contentDeletedIfNeeded(vmSnapshotCpy, content) {
-			controller.RemoveFinalizer(vmSnapshotCpy, vmSnapshotFinalizer)
-		}
-	} else {
-		// since no status subresource can update metadata and status
-		controller.AddFinalizer(vmSnapshotCpy, vmSnapshotFinalizer)
-
-		if content != nil && content.Status != nil {
-			// content exists and is initialized
-			vmSnapshotCpy.Status.VirtualMachineSnapshotContentName = &content.Name
-			vmSnapshotCpy.Status.CreationTime = content.Status.CreationTime
-			vmSnapshotCpy.Status.ReadyToUse = content.Status.ReadyToUse
-			vmSnapshotCpy.Status.Error = content.Status.Error
-		}
-	}
-
+	// terminal phase 1 - failed
 	if vmSnapshotDeadlineExceeded(vmSnapshotCpy) {
 		vmSnapshotCpy.Status.Phase = snapshotv1.Failed
 		updateSnapshotCondition(vmSnapshotCpy, newProgressingCondition(corev1.ConditionFalse, vmSnapshotDeadlineExceededError))
 		updateSnapshotCondition(vmSnapshotCpy, newFailureCondition(corev1.ConditionTrue, vmSnapshotDeadlineExceededError))
-	} else if vmSnapshotError(vmSnapshotCpy) != nil {
-		updateSnapshotCondition(vmSnapshotCpy, newProgressingCondition(corev1.ConditionFalse, "In error state"))
-		updateSnapshotCondition(vmSnapshotCpy, newReadyCondition(corev1.ConditionFalse, "Error"))
-	} else if vmSnapshotProgressing(vmSnapshotCpy) {
+		updateSnapshotCondition(vmSnapshotCpy, newReadyCondition(corev1.ConditionFalse, "Operation failed"))
+		// terminal phase 2 - succeeded
+	} else if vmSnapshotSucceeded(vmSnapshotCpy) || vmSnapshotCpy.Status.CreationTime != nil {
+		vmSnapshotCpy.Status.Phase = snapshotv1.Succeeded
+		updateSnapshotCondition(vmSnapshotCpy, newProgressingCondition(corev1.ConditionFalse, "Operation complete"))
+		updateSnapshotCondition(vmSnapshotCpy, newReadyCondition(corev1.ConditionTrue, "Operation complete"))
+		updateSnapshotSnapshotableVolumes(vmSnapshotCpy, content)
+		metrics.HandleSucceededVMSnapshot(vmSnapshotCpy)
+	} else {
 		vmSnapshotCpy.Status.Phase = snapshotv1.InProgress
 		if source != nil {
 			if source.Locked() {
@@ -728,21 +726,33 @@ func (ctrl *VMSnapshotController) updateSnapshotStatus(vmSnapshot *snapshotv1.Vi
 		} else {
 			updateSnapshotCondition(vmSnapshotCpy, newProgressingCondition(corev1.ConditionFalse, "Source does not exist"))
 		}
-		updateSnapshotCondition(vmSnapshotCpy, newReadyCondition(corev1.ConditionFalse, "Not ready"))
+
 		if vmSnapshotDeleting(vmSnapshotCpy) {
 			vmSnapshotCpy.Status.Phase = snapshotv1.Deleting
 			updateSnapshotCondition(vmSnapshotCpy, newProgressingCondition(corev1.ConditionFalse, "VM snapshot is deleting"))
-			updateSnapshotCondition(vmSnapshotCpy, newReadyCondition(corev1.ConditionFalse, "VM snapshot is deleting"))
 		}
-	} else if VmSnapshotReady(vmSnapshotCpy) {
-		vmSnapshotCpy.Status.Phase = snapshotv1.Succeeded
-		updateSnapshotCondition(vmSnapshotCpy, newProgressingCondition(corev1.ConditionFalse, "Operation complete"))
-		updateSnapshotCondition(vmSnapshotCpy, newReadyCondition(corev1.ConditionTrue, "Operation complete"))
-		updateSnapshotSnapshotableVolumes(vmSnapshotCpy, content)
+	}
+
+	if VmSnapshotReady(vmSnapshotCpy) {
+		updateSnapshotCondition(vmSnapshotCpy, newReadyCondition(corev1.ConditionTrue, "Ready"))
 	} else {
-		vmSnapshotCpy.Status.Phase = snapshotv1.Unknown
-		updateSnapshotCondition(vmSnapshotCpy, newProgressingCondition(corev1.ConditionUnknown, "Unknown state"))
-		updateSnapshotCondition(vmSnapshotCpy, newReadyCondition(corev1.ConditionUnknown, "Unknown state"))
+		updateSnapshotCondition(vmSnapshotCpy, newReadyCondition(corev1.ConditionFalse, "Not ready"))
+	}
+
+	if vmSnapshotError(vmSnapshotCpy) != nil {
+		updateSnapshotCondition(vmSnapshotCpy, newProgressingCondition(corev1.ConditionFalse, "In error state"))
+	}
+
+	if vmSnapshotDeleting(vmSnapshotCpy) {
+		// Enable the vmsnapshot to be deleted only in case the source is unlocked AND
+		// (the operation completed completed OR
+		// after waiting until the content is deleted if needed)
+		if canRemoveFinalizer && (!vmSnapshotProgressing(vmSnapshotCpy) || contentDeletedIfNeeded(vmSnapshotCpy, content)) {
+			controller.RemoveFinalizer(vmSnapshotCpy, vmSnapshotFinalizer)
+		}
+	} else {
+		// since no status subresource can update metadata and status
+		controller.AddFinalizer(vmSnapshotCpy, vmSnapshotFinalizer)
 	}
 
 	if !equality.Semantic.DeepEqual(vmSnapshot, vmSnapshotCpy) {
@@ -755,7 +765,7 @@ func (ctrl *VMSnapshotController) updateSnapshotStatus(vmSnapshot *snapshotv1.Vi
 }
 
 func updateVMSnapshotIndications(source snapshotSource) ([]snapshotv1.Indication, error) {
-	indications := []snapshotv1.Indication{}
+	var indications []snapshotv1.Indication
 	online, err := source.Online()
 	if err != nil {
 		return indications, err
@@ -771,7 +781,6 @@ func updateVMSnapshotIndications(source snapshotSource) ([]snapshotv1.Indication
 
 		if ga {
 			indications = append(indications, snapshotv1.VMSnapshotGuestAgentIndication)
-
 		} else {
 			indications = append(indications, snapshotv1.VMSnapshotNoGuestAgentIndication)
 		}
@@ -824,7 +833,8 @@ func (ctrl *VMSnapshotController) updateVolumeSnapshotStatuses(vm *kubevirtv1.Vi
 	if equality.Semantic.DeepEqual(vmCopy.Status.VolumeSnapshotStatuses, vm.Status.VolumeSnapshotStatuses) {
 		return nil
 	}
-	return ctrl.vmStatusUpdater.UpdateStatus(vmCopy)
+	_, err := ctrl.Client.VirtualMachine(vmCopy.Namespace).UpdateStatus(context.Background(), vmCopy, metav1.UpdateOptions{})
+	return err
 }
 
 func (ctrl *VMSnapshotController) getVolumeSnapshotStatus(vm *kubevirtv1.VirtualMachine, volume *kubevirtv1.Volume) kubevirtv1.VolumeSnapshotStatus {
@@ -1028,15 +1038,6 @@ func (ctrl *VMSnapshotController) getVMI(vm *kubevirtv1.VirtualMachine) (*kubevi
 func (ctrl *VMSnapshotController) checkVMIRunning(vm *kubevirtv1.VirtualMachine) (bool, error) {
 	_, exists, err := ctrl.getVMI(vm)
 	return exists, err
-}
-
-func checkVMRunning(vm *kubevirtv1.VirtualMachine) (bool, error) {
-	rs, err := vm.RunStrategy()
-	if err != nil {
-		return false, err
-	}
-
-	return rs == kubevirtv1.RunStrategyAlways || rs == kubevirtv1.RunStrategyRerunOnFailure, nil
 }
 
 func updateSnapshotCondition(ss *snapshotv1.VirtualMachineSnapshot, c snapshotv1.Condition) {

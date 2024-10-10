@@ -23,10 +23,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 
-	"k8s.io/apimachinery/pkg/api/resource"
-
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
+	"kubevirt.io/kubevirt/pkg/virt-config/deprecation"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -35,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/cache"
 
@@ -44,10 +44,13 @@ import (
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	"kubevirt.io/kubevirt/pkg/controller"
+	netadmitter "kubevirt.io/kubevirt/pkg/network/admitter"
 	migrationutil "kubevirt.io/kubevirt/pkg/util/migrations"
 
 	"kubevirt.io/kubevirt/pkg/instancetype"
+	"kubevirt.io/kubevirt/pkg/liveupdate/memory"
 	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-api"
+	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -61,19 +64,21 @@ type VMsAdmitter struct {
 	VirtClient          kubecli.KubevirtClient
 	DataSourceInformer  cache.SharedIndexInformer
 	NamespaceInformer   cache.SharedIndexInformer
+	DataVolumeInformer  cache.SharedIndexInformer
 	InstancetypeMethods instancetype.Methods
 	ClusterConfig       *virtconfig.ClusterConfig
 	cloneAuthFunc       CloneAuthFunc
 }
 
 type authProxy struct {
+	ctx                context.Context
 	client             kubecli.KubevirtClient
 	dataSourceInformer cache.SharedIndexInformer
 	namespaceInformer  cache.SharedIndexInformer
 }
 
 func (p *authProxy) CreateSar(sar *authv1.SubjectAccessReview) (*authv1.SubjectAccessReview, error) {
-	return p.client.AuthorizationV1().SubjectAccessReviews().Create(context.Background(), sar, metav1.CreateOptions{})
+	return p.client.AuthorizationV1().SubjectAccessReviews().Create(p.ctx, sar, metav1.CreateOptions{})
 }
 
 func (p *authProxy) GetNamespace(name string) (*corev1.Namespace, error) {
@@ -81,7 +86,7 @@ func (p *authProxy) GetNamespace(name string) (*corev1.Namespace, error) {
 	if err != nil {
 		return nil, err
 	} else if !exists {
-		return nil, fmt.Errorf("namespace %s does not exist", name)
+		return nil, errors.NewNotFound(corev1.Resource("namespace"), name)
 	}
 
 	ns := obj.(*corev1.Namespace).DeepCopy()
@@ -94,7 +99,7 @@ func (p *authProxy) GetDataSource(namespace, name string) (*cdiv1.DataSource, er
 	if err != nil {
 		return nil, err
 	} else if !exists {
-		return nil, fmt.Errorf("dataSource %s does not exist", key)
+		return nil, errors.NewNotFound(cdiv1.Resource("datasource"), key)
 	}
 
 	ds := obj.(*cdiv1.DataSource).DeepCopy()
@@ -106,6 +111,7 @@ func NewVMsAdmitter(clusterConfig *virtconfig.ClusterConfig, client kubecli.Kube
 		VirtClient:          client,
 		DataSourceInformer:  informers.DataSourceInformer,
 		NamespaceInformer:   informers.NamespaceInformer,
+		DataVolumeInformer:  informers.DataVolumeInformer,
 		InstancetypeMethods: &instancetype.InstancetypeMethods{Clientset: client},
 		ClusterConfig:       clusterConfig,
 		cloneAuthFunc: func(dv *cdiv1.DataVolume, requestNamespace, requestName string, proxy cdiv1.AuthorizationHelperProxy, saNamespace, saName string) (bool, string, error) {
@@ -115,7 +121,7 @@ func NewVMsAdmitter(clusterConfig *virtconfig.ClusterConfig, client kubecli.Kube
 	}
 }
 
-func (admitter *VMsAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+func (admitter *VMsAdmitter) Admit(ctx context.Context, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	if !webhookutils.ValidateRequestResource(ar.Request.Resource, webhooks.VirtualMachineGroupVersionResource.Group, webhooks.VirtualMachineGroupVersionResource.Resource) {
 		err := fmt.Errorf("expect resource to be '%s'", webhooks.VirtualMachineGroupVersionResource.Resource)
 		return webhookutils.ToAdmissionResponseError(err)
@@ -151,7 +157,7 @@ func (admitter *VMsAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1
 	}
 
 	// Set VirtualMachine defaults on the copy before validating
-	if err = webhooks.SetDefaultVirtualMachine(admitter.ClusterConfig, vmCopy); err != nil {
+	if err = webhooks.SetDefaultVirtualMachineInstanceSpec(admitter.ClusterConfig, &vmCopy.Spec.Template.Spec); err != nil {
 		return webhookutils.ToAdmissionResponseError(err)
 	}
 
@@ -166,12 +172,23 @@ func (admitter *VMsAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1
 		}
 	}
 
+	if ar.Request.Operation == admissionv1.Create {
+		clusterCfg := admitter.ClusterConfig.GetConfig()
+		if devCfg := clusterCfg.DeveloperConfiguration; devCfg != nil {
+			causes = append(causes, deprecation.ValidateFeatureGates(devCfg.FeatureGates, &vm.Spec.Template.Spec)...)
+		}
+
+		netValidator := netadmitter.NewValidator(k8sfield.NewPath("spec"), &vmCopy.Spec.Template.Spec, admitter.ClusterConfig)
+		if causes = netValidator.ValidateCreation(); len(causes) > 0 {
+			return webhookutils.ToAdmissionResponse(causes)
+		}
+	}
 	causes = ValidateVirtualMachineSpec(k8sfield.NewPath("spec"), &vmCopy.Spec, admitter.ClusterConfig, accountName)
 	if len(causes) > 0 {
 		return webhookutils.ToAdmissionResponse(causes)
 	}
 
-	causes, err = admitter.authorizeVirtualMachineSpec(ar.Request, &vm)
+	causes, err = admitter.authorizeVirtualMachineSpec(ctx, ar.Request, &vm)
 	if err != nil {
 		return webhookutils.ToAdmissionResponseError(err)
 	}
@@ -179,7 +196,7 @@ func (admitter *VMsAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1
 		return webhookutils.ToAdmissionResponse(causes)
 	}
 
-	causes, err = admitter.validateVolumeRequests(&vm)
+	causes, err = admitter.validateVolumeRequests(ctx, &vm)
 	if err != nil {
 		return webhookutils.ToAdmissionResponseError(err)
 	} else if len(causes) > 0 {
@@ -201,20 +218,24 @@ func (admitter *VMsAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1
 		metrics.NewVMCreated(&vm)
 	}
 
-	return &admissionv1.AdmissionResponse{
-		Allowed:  true,
-		Warnings: warnDeprecatedAPIs(&vm.Spec.Template.Spec, admitter.ClusterConfig),
+	warnings := warnDeprecatedAPIs(&vm.Spec.Template.Spec, admitter.ClusterConfig)
+	if vm.Spec.Running != nil {
+		warnings = append(warnings, "spec.running is deprecated, please use spec.runStrategy instead.")
 	}
 
+	return &admissionv1.AdmissionResponse{
+		Allowed:  true,
+		Warnings: warnings,
+	}
 }
 
-func (admitter *VMsAdmitter) AdmitStatus(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+func (admitter *VMsAdmitter) AdmitStatus(ctx context.Context, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	vm, _, err := webhookutils.GetVMFromAdmissionReview(ar)
 	if err != nil {
 		return webhookutils.ToAdmissionResponseError(err)
 	}
 
-	causes, err := admitter.validateVolumeRequests(vm)
+	causes, err := admitter.validateVolumeRequests(ctx, vm)
 	if err != nil {
 		return webhookutils.ToAdmissionResponseError(err)
 	} else if len(causes) > 0 {
@@ -236,6 +257,49 @@ func (admitter *VMsAdmitter) AdmitStatus(ar *admissionv1.AdmissionReview) *admis
 	return &reviewResponse
 }
 
+const (
+	instancetypeCPUGuestPath              = "instancetype.spec.cpu.guest"
+	spreadAcrossSocketsCoresErrFmt        = "%d vCPUs provided by the instance type are not divisible by the Spec.PreferSpreadSocketToCoreRatio or Spec.CPU.PreferSpreadOptions.Ratio of %d provided by the preference"
+	spreadAcrossCoresThreadsErrFmt        = "%d vCPUs provided by the instance type are not divisible by the number of threads per core %d"
+	spreadAcrossSocketsCoresThreadsErrFmt = "%d vCPUs provided by the instance type are not divisible by the number of threads per core %d and Spec.PreferSpreadSocketToCoreRatio or Spec.CPU.PreferSpreadOptions.Ratio of %d"
+)
+
+func checkSpreadCPUTopology(instancetypeSpec *instancetypev1beta1.VirtualMachineInstancetypeSpec, preferenceSpec *instancetypev1beta1.VirtualMachinePreferenceSpec) []metav1.StatusCause {
+	if topology := instancetype.GetPreferredTopology(preferenceSpec); instancetypeSpec == nil || (topology != instancetypev1beta1.Spread && topology != instancetypev1beta1.DeprecatedPreferSpread) {
+		return nil
+	}
+
+	ratio, across := instancetype.GetSpreadOptions(preferenceSpec)
+	switch across {
+	case instancetypev1beta1.SpreadAcrossSocketsCores:
+		if (instancetypeSpec.CPU.Guest % ratio) > 0 {
+			return []metav1.StatusCause{{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: fmt.Sprintf(spreadAcrossSocketsCoresErrFmt, instancetypeSpec.CPU.Guest, ratio),
+				Field:   k8sfield.NewPath(instancetypeCPUGuestPath).String(),
+			}}
+		}
+	case instancetypev1beta1.SpreadAcrossCoresThreads:
+		if (instancetypeSpec.CPU.Guest % ratio) > 0 {
+			return []metav1.StatusCause{{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: fmt.Sprintf(spreadAcrossCoresThreadsErrFmt, instancetypeSpec.CPU.Guest, ratio),
+				Field:   k8sfield.NewPath(instancetypeCPUGuestPath).String(),
+			}}
+		}
+	case instancetypev1beta1.SpreadAcrossSocketsCoresThreads:
+		const threadsPerCore = 2
+		if (instancetypeSpec.CPU.Guest%threadsPerCore) > 0 || ((instancetypeSpec.CPU.Guest/threadsPerCore)%ratio) > 0 {
+			return []metav1.StatusCause{{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: fmt.Sprintf(spreadAcrossSocketsCoresThreadsErrFmt, instancetypeSpec.CPU.Guest, threadsPerCore, ratio),
+				Field:   k8sfield.NewPath(instancetypeCPUGuestPath).String(),
+			}}
+		}
+	}
+	return nil
+}
+
 func (admitter *VMsAdmitter) applyInstancetypeToVm(vm *v1.VirtualMachine) (*instancetypev1beta1.VirtualMachineInstancetypeSpec, *instancetypev1beta1.VirtualMachinePreferenceSpec, []metav1.StatusCause) {
 	instancetypeSpec, err := admitter.InstancetypeMethods.FindInstancetypeSpec(vm)
 	if err != nil {
@@ -255,19 +319,8 @@ func (admitter *VMsAdmitter) applyInstancetypeToVm(vm *v1.VirtualMachine) (*inst
 		}}
 	}
 
-	if topology := instancetype.GetPreferredTopology(preferenceSpec); instancetypeSpec != nil && topology == instancetypev1beta1.PreferSpread {
-		ratio := preferenceSpec.PreferSpreadSocketToCoreRatio
-		if ratio == 0 {
-			ratio = instancetype.DefaultSpreadRatio
-		}
-
-		if (instancetypeSpec.CPU.Guest % ratio) > 0 {
-			return nil, nil, []metav1.StatusCause{{
-				Type:    metav1.CauseTypeFieldValueInvalid,
-				Message: "Instancetype CPU Guest is not divisible by PreferSpreadSocketToCoreRatio",
-				Field:   k8sfield.NewPath("instancetype.spec.cpu.guest").String(),
-			}}
-		}
+	if spreadConflicts := checkSpreadCPUTopology(instancetypeSpec, preferenceSpec); len(spreadConflicts) > 0 {
+		return nil, nil, spreadConflicts
 	}
 
 	conflicts := admitter.InstancetypeMethods.ApplyToVmi(k8sfield.NewPath("spec", "template", "spec"), instancetypeSpec, preferenceSpec, &vm.Spec.Template.Spec, &vm.Spec.Template.ObjectMeta)
@@ -287,8 +340,22 @@ func (admitter *VMsAdmitter) applyInstancetypeToVm(vm *v1.VirtualMachine) (*inst
 	return nil, nil, causes
 }
 
-func (admitter *VMsAdmitter) authorizeVirtualMachineSpec(ar *admissionv1.AdmissionRequest, vm *v1.VirtualMachine) ([]metav1.StatusCause, error) {
+func (admitter *VMsAdmitter) authorizeVirtualMachineSpec(ctx context.Context, ar *admissionv1.AdmissionRequest, vm *v1.VirtualMachine) ([]metav1.StatusCause, error) {
 	var causes []metav1.StatusCause
+
+	if ar.Operation == admissionv1.Update || ar.Operation == admissionv1.Delete {
+		oldVM := &v1.VirtualMachine{}
+		if err := json.Unmarshal(ar.OldObject.Raw, oldVM); err != nil {
+			return []metav1.StatusCause{{
+				Type:    metav1.CauseTypeUnexpectedServerResponse,
+				Message: "Could not fetch old VM",
+			}}, nil
+		}
+
+		if equality.Semantic.DeepEqual(oldVM.Spec.DataVolumeTemplates, vm.Spec.DataVolumeTemplates) {
+			return nil, nil
+		}
+	}
 
 	for idx, dataVolume := range vm.Spec.DataVolumeTemplates {
 		targetNamespace := vm.Namespace
@@ -311,12 +378,25 @@ func (admitter *VMsAdmitter) authorizeVirtualMachineSpec(ar *admissionv1.Admissi
 			}
 		}
 
-		proxy := &authProxy{client: admitter.VirtClient, dataSourceInformer: admitter.DataSourceInformer, namespaceInformer: admitter.NamespaceInformer}
-		dv := &cdiv1.DataVolume{
+		dv, err := storagetypes.GetDataVolumeFromCache(targetNamespace, dataVolume.Name, admitter.DataVolumeInformer.GetStore())
+		if err != nil {
+			return nil, err
+		}
+		if dv != nil {
+			continue
+		}
+
+		dv = &cdiv1.DataVolume{
 			ObjectMeta: dataVolume.ObjectMeta,
 			Spec:       dataVolume.Spec,
 		}
 		dv.Namespace = targetNamespace
+		proxy := &authProxy{
+			ctx:                ctx,
+			client:             admitter.VirtClient,
+			dataSourceInformer: admitter.DataSourceInformer,
+			namespaceInformer:  admitter.NamespaceInformer,
+		}
 		allowed, message, err := admitter.cloneAuthFunc(dv, ar.Namespace, ar.Name, proxy, targetNamespace, serviceAccountName)
 		if err != nil && err != cdiv1.ErrNoTokenOkay {
 			return nil, err
@@ -356,46 +436,121 @@ func ValidateVirtualMachineSpec(field *k8sfield.Path, spec *v1.VirtualMachineSpe
 }
 
 func validateDataVolumeTemplate(field *k8sfield.Path, spec *v1.VirtualMachineSpec) (causes []metav1.StatusCause) {
-	if len(spec.DataVolumeTemplates) > 0 {
+	for idx, dataVolume := range spec.DataVolumeTemplates {
+		cause := validateDataVolume(field.Child("dataVolumeTemplate").Index(idx), dataVolume)
+		if cause != nil {
+			causes = append(causes, cause...)
+			continue
+		}
 
-		for idx, dataVolume := range spec.DataVolumeTemplates {
-			if dataVolume.Name == "" {
-				causes = append(causes, metav1.StatusCause{
-					Type:    metav1.CauseTypeFieldValueRequired,
-					Message: fmt.Sprintf("'name' field must not be empty for DataVolumeTemplate entry %s.", field.Child("dataVolumeTemplate").Index(idx).String()),
-					Field:   field.Child("dataVolumeTemplate").Index(idx).Child("name").String(),
-				})
+		dataVolumeRefFound := false
+		for _, volume := range spec.Template.Spec.Volumes {
+			if volume.VolumeSource.PersistentVolumeClaim != nil && volume.VolumeSource.PersistentVolumeClaim.ClaimName == dataVolume.Name ||
+				volume.VolumeSource.DataVolume != nil && volume.VolumeSource.DataVolume.Name == dataVolume.Name {
+				dataVolumeRefFound = true
+				break
 			}
+		}
 
-			dataVolumeRefFound := false
-			for _, volume := range spec.Template.Spec.Volumes {
-				// TODO: Assuming here that PVC name == DV name which might not be the case in the future
-				if volume.VolumeSource.PersistentVolumeClaim != nil && volume.VolumeSource.PersistentVolumeClaim.ClaimName == dataVolume.Name {
-					dataVolumeRefFound = true
-					break
-				} else if volume.VolumeSource.DataVolume != nil && volume.VolumeSource.DataVolume.Name == dataVolume.Name {
-					dataVolumeRefFound = true
-					break
-				}
-			}
-
-			if !dataVolumeRefFound {
-				causes = append(causes, metav1.StatusCause{
-					Type:    metav1.CauseTypeFieldValueRequired,
-					Message: fmt.Sprintf("DataVolumeTemplate entry %s must be referenced in the VMI template's 'volumes' list", field.Child("dataVolumeTemplate").Index(idx).String()),
-					Field:   field.Child("dataVolumeTemplate").Index(idx).String(),
-				})
-			}
+		if !dataVolumeRefFound {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueRequired,
+				Message: fmt.Sprintf("DataVolumeTemplate entry %s must be referenced in the VMI template's 'volumes' list", field.Child("dataVolumeTemplate").Index(idx).String()),
+				Field:   field.Child("dataVolumeTemplate").Index(idx).String(),
+			})
 		}
 	}
 	return causes
+}
+
+func validateDataVolume(field *k8sfield.Path, dataVolume v1.DataVolumeTemplateSpec) []metav1.StatusCause {
+	if dataVolume.Name == "" {
+		return []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldValueRequired,
+			Message: fmt.Sprintf("'name' field must not be empty for DataVolumeTemplate entry %s.", field.Child("name").String()),
+			Field:   field.Child("name").String(),
+		}}
+	}
+	if dataVolume.Spec.PVC == nil && dataVolume.Spec.Storage == nil {
+		return []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: "Missing Data volume PVC or Storage",
+			Field:   field.Child("PVC", "Storage").String(),
+		}}
+	}
+	if dataVolume.Spec.PVC != nil && dataVolume.Spec.Storage != nil {
+		return []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: "Duplicate storage definition, both target storage and target pvc defined",
+			Field:   field.Child("PVC", "Storage").String(),
+		}}
+	}
+
+	var dataSourceRef *corev1.TypedObjectReference
+	var dataSource *corev1.TypedLocalObjectReference
+	if dataVolume.Spec.PVC != nil {
+		dataSourceRef = dataVolume.Spec.PVC.DataSourceRef
+		dataSource = dataVolume.Spec.PVC.DataSource
+	} else if dataVolume.Spec.Storage != nil {
+		dataSourceRef = dataVolume.Spec.Storage.DataSourceRef
+		dataSource = dataVolume.Spec.Storage.DataSource
+	}
+
+	// dataVolume is externally populated
+	if (dataSourceRef != nil || dataSource != nil) &&
+		(dataVolume.Spec.Source != nil || dataVolume.Spec.SourceRef != nil) {
+		return []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: "External population is incompatible with Source and SourceRef",
+			Field:   field.Child("source").String(),
+		}}
+	}
+
+	if dataVolume.Spec.Source == nil && dataVolume.Spec.SourceRef == nil {
+		return []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: "Data volume should have either Source, SourceRef, or be externally populated",
+			Field:   field.Child("source", "sourceRef").String(),
+		}}
+	}
+
+	if dataVolume.Spec.Source != nil {
+		return validateNumberOfSources(field, dataVolume.Spec.Source)
+	}
+
+	return nil
+}
+
+func validateNumberOfSources(field *field.Path, source *cdiv1.DataVolumeSource) []metav1.StatusCause {
+	numberOfSources := 0
+	s := reflect.ValueOf(source).Elem()
+	for i := 0; i < s.NumField(); i++ {
+		if !reflect.ValueOf(s.Field(i).Interface()).IsNil() {
+			numberOfSources++
+		}
+	}
+	if numberOfSources == 0 {
+		return []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: "Missing dataVolume valid source",
+			Field:   field.Child("source").String(),
+		}}
+	}
+	if numberOfSources > 1 {
+		return []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: "Multiple dataVolume sources",
+			Field:   field.Child("source").String(),
+		}}
+	}
+	return nil
 }
 
 func validateRunStrategy(field *k8sfield.Path, spec *v1.VirtualMachineSpec) (causes []metav1.StatusCause) {
 	if spec.Running != nil && spec.RunStrategy != nil {
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Running and RunStrategy are mutually exclusive"),
+			Message: fmt.Sprintf("Running and RunStrategy are mutually exclusive. Note that Running is deprecated, please use RunStrategy instead"),
 			Field:   field.Child("running").String(),
 		})
 	}
@@ -403,7 +558,7 @@ func validateRunStrategy(field *k8sfield.Path, spec *v1.VirtualMachineSpec) (cau
 	if spec.Running == nil && spec.RunStrategy == nil {
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("One of Running or RunStrategy must be specified"),
+			Message: fmt.Sprintf("RunStrategy must be specified"),
 			Field:   field.Child("running").String(),
 		})
 	}
@@ -432,26 +587,33 @@ func validateLiveUpdateFeatures(field *k8sfield.Path, spec *v1.VirtualMachineSpe
 		return causes
 	}
 
-	if spec.Instancetype != nil {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueNotSupported,
-			Message: fmt.Sprintf("Cannot configure instance type when the vmRolloutStrategy is LiveUpdate"),
-			Field:   field.Child("instancetype").String(),
-		})
-	}
-
-	causes = append(causes, validateLiveUpdateCPU(field, &spec.Template.Spec.Domain)...)
-
-	if hasCPURequestsOrLimits(&spec.Template.Spec.Domain.Resources) {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Configuration of CPU resource requirements is not allowed when CPU live update is enabled"),
-			Field:   field.Child("template", "spec", "domain", "resources").String(),
-		})
+	if spec.Template.Spec.Domain.CPU != nil {
+		causes = append(causes, validateLiveUpdateCPU(field, &spec.Template.Spec.Domain)...)
 	}
 
 	if spec.Template.Spec.Domain.Memory != nil && spec.Template.Spec.Domain.Memory.MaxGuest != nil {
-		causes = append(causes, validateLiveUpdateMemory(field, &spec.Template.Spec.Domain, spec.Template.Spec.Architecture)...)
+		if err := memory.ValidateLiveUpdateMemory(&spec.Template.Spec, spec.Template.Spec.Domain.Memory.MaxGuest); err != nil {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: err.Error(),
+				Field:   field.Child("template", "spec", "domain", "memory", "guest").String(),
+			})
+		}
+	}
+
+	if spec.UpdateVolumesStrategy != nil && !config.VolumesUpdateStrategyEnabled() {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("%s feature gate is not enabled in kubevirt-config", virtconfig.VolumesUpdateStrategy),
+			Field:   "updateVolumesStrategy",
+		})
+	}
+	if spec.UpdateVolumesStrategy != nil && *spec.UpdateVolumesStrategy == v1.UpdateVolumesStrategyMigration && !config.VolumeMigrationEnabled() {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("%s feature gate is not enabled in kubevirt-config", virtconfig.VolumeMigration),
+			Field:   "updateVolumesStrategy",
+		})
 	}
 
 	return causes
@@ -469,104 +631,7 @@ func validateLiveUpdateCPU(field *k8sfield.Path, domain *v1.DomainSpec) (causes 
 	return causes
 }
 
-func validateLiveUpdateMemory(field *k8sfield.Path, domain *v1.DomainSpec, architecture string) (causes []metav1.StatusCause) {
-	if hasMemoryLimits(&domain.Resources) {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Configuration of Memory limits is not allowed when Memory live update is enabled"),
-			Field:   field.Child("template", "spec", "domain", "resources").String(),
-		})
-	}
-
-	if domain.CPU != nil &&
-		domain.CPU.Realtime != nil {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Memory hotplug is not compatible with realtime VMs"),
-			Field:   field.Child("template", "spec", "domain", "cpu", "realtime").String(),
-		})
-	}
-
-	if domain.CPU != nil &&
-		domain.CPU.NUMA != nil &&
-		domain.CPU.NUMA.GuestMappingPassthrough != nil {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Memory hotplug is not compatible with guest mapping passthrough"),
-			Field:   field.Child("template", "spec", "domain", "cpu", "numa", "guestMappingPassthrough").String(),
-		})
-	}
-
-	if domain.LaunchSecurity != nil {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Memory hotplug is not compatible with encrypted VMs"),
-			Field:   field.Child("template", "spec", "domain", "launchSecurity").String(),
-		})
-	}
-
-	if domain.CPU != nil &&
-		domain.CPU.DedicatedCPUPlacement {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Memory hotplug is not compatible with dedicated CPUs"),
-			Field:   field.Child("template", "spec", "domain", "cpu", "dedicatedCpuPlacement").String(),
-		})
-	}
-
-	if domain.Memory != nil &&
-		domain.Memory.Hugepages != nil {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Memory hotplug is not compatible with hugepages"),
-			Field:   field.Child("template", "spec", "domain", "memory", "hugepages").String(),
-		})
-	}
-
-	if domain.Memory == nil ||
-		domain.Memory.Guest == nil {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Guest memory must be configured when memory hotplug is enabled"),
-			Field:   field.Child("template", "spec", "domain", "memory", "guest").String(),
-		})
-	} else if domain.Memory.Guest.Cmp(*domain.Memory.MaxGuest) > 0 {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Guest memory is greater than the configured maxGuest memory"),
-			Field:   field.Child("template", "spec", "domain", "memory", "guest").String(),
-		})
-	} else if domain.Memory.Guest.Value()%converter.MemoryHotplugBlockAlignmentBytes != 0 {
-		alignment := resource.NewQuantity(converter.MemoryHotplugBlockAlignmentBytes, resource.BinarySI)
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Guest memory must be %s aligned", alignment),
-			Field:   field.Child("template", "spec", "domain", "memory", "guest").String(),
-		})
-	}
-
-	if domain.Memory.MaxGuest.Value()%converter.MemoryHotplugBlockAlignmentBytes != 0 {
-		alignment := resource.NewQuantity(converter.MemoryHotplugBlockAlignmentBytes, resource.BinarySI)
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("MaxGuest must be %s aligned", alignment),
-			Field:   field.Child("template", "spec", "domain", "memory", "maxGuest").String(),
-		})
-	}
-
-	if architecture != "amd64" {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Memory hotplug is only available for x86_64 VMs"),
-			Field:   field.Child("template", "spec", "architecture").String(),
-		})
-		return causes
-	}
-
-	return causes
-}
-
-func (admitter *VMsAdmitter) validateVolumeRequests(vm *v1.VirtualMachine) ([]metav1.StatusCause, error) {
+func (admitter *VMsAdmitter) validateVolumeRequests(ctx context.Context, vm *v1.VirtualMachine) ([]metav1.StatusCause, error) {
 	if len(vm.Status.VolumeRequests) == 0 {
 		return nil, nil
 	}
@@ -584,7 +649,7 @@ func (admitter *VMsAdmitter) validateVolumeRequests(vm *v1.VirtualMachine) ([]me
 	if vm.Status.Ready {
 		var err error
 
-		vmi, err = admitter.VirtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &metav1.GetOptions{})
+		vmi, err = admitter.VirtClient.VirtualMachineInstance(vm.Namespace).Get(ctx, vm.Name, metav1.GetOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			return nil, err
 		} else if err == nil && vmi.DeletionTimestamp == nil {
@@ -741,6 +806,13 @@ func validateDiskConfiguration(disk *v1.Disk, name string) []metav1.StatusCause 
 			Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
 		}}
 	}
+	if disk.DedicatedIOThread != nil && *disk.DedicatedIOThread {
+		return []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: "IOThreads are not supported by scsi bus.",
+			Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+		}}
+	}
 
 	return nil
 }
@@ -794,33 +866,4 @@ func validateSnapshotStatus(ar *admissionv1.AdmissionRequest, vm *v1.VirtualMach
 	}
 
 	return nil
-}
-
-func (admitter *VMsAdmitter) isMigrationInProgress(vmi *v1.VirtualMachineInstance) error {
-	if vmi.Status.MigrationState != nil &&
-		!vmi.Status.MigrationState.Completed {
-		return fmt.Errorf("cannot update while VMI migration is in progress")
-	}
-
-	err := EnsureNoMigrationConflict(admitter.VirtClient, vmi.Name, vmi.Namespace)
-	if err != nil {
-		return fmt.Errorf("cannot update while VMI migration is in progress: %v", err)
-	}
-	return nil
-}
-
-func hasCPURequestsOrLimits(rr *v1.ResourceRequirements) bool {
-	if _, ok := rr.Requests[corev1.ResourceCPU]; ok {
-		return true
-	}
-	if _, ok := rr.Limits[corev1.ResourceCPU]; ok {
-		return true
-	}
-
-	return false
-}
-
-func hasMemoryLimits(rr *v1.ResourceRequirements) bool {
-	_, ok := rr.Limits[corev1.ResourceMemory]
-	return ok
 }

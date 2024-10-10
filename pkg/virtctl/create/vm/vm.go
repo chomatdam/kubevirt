@@ -31,11 +31,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/yaml"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/api/instancetype"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
-	"sigs.k8s.io/yaml"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/virtctl/create/params"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
@@ -62,8 +64,9 @@ const (
 	InferPreferenceFromFlag    = "infer-preference-from"
 	VolumeImportFlag           = "volume-import"
 
-	cloudInitDisk = "cloudinitdisk"
+	CloudInitDisk = "cloudinitdisk"
 	blank         = "blank"
+	gcs           = "gcs"
 	http          = "http"
 	imageIO       = "imageio"
 	pvc           = "pvc"
@@ -72,7 +75,8 @@ const (
 	vddk          = "vddk"
 	snapshot      = "snapshot"
 
-	InvalidInferenceVolumeError = "inference of instancetype or preference works only with DataSources, DataVolumes or PersistentVolumeClaims"
+	InvalidInferenceVolumeError   = "inference of instancetype or preference works only with DataSources, DataVolumes or PersistentVolumeClaims"
+	DVInvalidInferenceVolumeError = "this DataVolume is not valid to infer an instancetype or preference from (source needs to be PVC, Registry or Snapshot, sourceRef needs to be DataSource)"
 )
 
 type createVM struct {
@@ -104,33 +108,7 @@ type createVM struct {
 	memoryChanged                 bool
 }
 
-type cloneVolume struct {
-	Name      string             `param:"name"`
-	Source    string             `param:"src"`
-	BootOrder *uint              `param:"bootorder"`
-	Size      *resource.Quantity `param:"size"`
-}
-
-type containerdiskVolume struct {
-	Name      string `param:"name"`
-	Source    string `param:"src"`
-	BootOrder *uint  `param:"bootorder"`
-}
-
-type pvcVolume struct {
-	Name      string `param:"name"`
-	Source    string `param:"src"`
-	BootOrder *uint  `param:"bootorder"`
-}
-
-type blankVolume struct {
-	Name string             `param:"name"`
-	Size *resource.Quantity `param:"size"`
-}
-
-type optionFn func(*createVM, *v1.VirtualMachine) error
-
-var optFns = map[string]optionFn{
+var optFns = map[string]func(*createVM, *v1.VirtualMachine) error{
 	RunStrategyFlag:          withRunStrategy,
 	InstancetypeFlag:         withInstancetype,
 	PreferenceFlag:           withPreference,
@@ -146,7 +124,6 @@ var optFns = map[string]optionFn{
 
 // Unless the boot order is specified by the user volumes have the following fixed boot order:
 // Containerdisk > DataSource > Clone PVC > PVC
-// Flags dependent on the boot order (e.g. InferInstancetype or InferPreference) need to run last.
 // This is controlled by the order in which flags are processed.
 var flags = []string{
 	RunStrategyFlag,
@@ -162,83 +139,9 @@ var flags = []string{
 	CloudInitNetworkDataFlag,
 }
 
-type dataVolumeSourceBlank struct {
-	Size *resource.Quantity `param:"size"`
-	Type string             `param:"type"`
-	Name string             `param:"name"`
-}
-
-type dataVolumeSourceHttp struct {
-	CertConfigMap      string             `param:"certconfigmap"`
-	ExtraHeaders       []string           `param:"extraheaders"`
-	SecretExtraHeaders []string           `param:"secretextraheaders"`
-	SecretRef          string             `param:"secretref"`
-	URL                string             `param:"url"`
-	Size               *resource.Quantity `param:"size"`
-	Type               string             `param:"type"`
-	Name               string             `param:"name"`
-}
-
-type dataVolumeSourceImageIO struct {
-	CertConfigMap string             `param:"certconfigmap"`
-	DiskId        string             `param:"diskid"`
-	SecretRef     string             `param:"secretref"`
-	URL           string             `param:"url"`
-	Size          *resource.Quantity `param:"size"`
-	Type          string             `param:"type"`
-	Name          string             `param:"name"`
-}
-
-type dataVolumeSourcePVC struct {
-	Name   string             `param:"name"`
-	Source string             `param:"src"`
-	Size   *resource.Quantity `param:"size"`
-	Type   string             `param:"type"`
-}
-
-type dataVolumeSourceRegistry struct {
-	CertConfigMap string             `param:"certconfigmap"`
-	ImageStream   string             `param:"imagestream"`
-	PullMethod    string             `param:"pullmethod"`
-	SecretRef     string             `param:"secretref"`
-	URL           string             `param:"url"`
-	Size          *resource.Quantity `param:"size"`
-	Type          string             `param:"type"`
-	Name          string             `param:"name"`
-}
-
-type dataVolumeSourceS3 struct {
-	CertConfigMap string             `param:"certconfigmap"`
-	SecretRef     string             `param:"secretref"`
-	URL           string             `param:"url"`
-	Size          *resource.Quantity `param:"size"`
-	Type          string             `param:"type"`
-	Name          string             `param:"name"`
-}
-
-type dataVolumeSourceVDDK struct {
-	BackingFile  string             `param:"backingfile"`
-	InitImageUrl string             `param:"initimageurl"`
-	SecretRef    string             `param:"secretref"`
-	ThumbPrint   string             `param:"thumbprint"`
-	URL          string             `param:"url"`
-	UUID         string             `param:"uuid"`
-	Size         *resource.Quantity `param:"size"`
-	Type         string             `param:"type"`
-	Name         string             `param:"name"`
-}
-
-type dataVolumeSourceSnapshot struct {
-	Name   string             `param:"name"`
-	Source string             `param:"src"`
-	Size   *resource.Quantity `param:"size"`
-	Type   string             `param:"type"`
-}
-
-type volumeImportFn func(string) (*cdiv1.DataVolumeSource, error)
-
-var volumeImportOptions = map[string]volumeImportFn{
+var volumeImportOptions = map[string]func(string) (*cdiv1.DataVolumeSource, error){
 	blank:    withVolumeSourceBlank,
+	gcs:      withVolumeSourceGcs,
 	http:     withVolumeSourceHttp,
 	imageIO:  withVolumeSourceImageIO,
 	pvc:      withVolumeSourcePVC,
@@ -269,9 +172,7 @@ func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 		Long:    "Create a VirtualMachine manifest.\n\nIf no boot order was specified volumes have the following fixed boot order:\nContainerdisk > DataSource > Clone PVC > PVC",
 		Args:    cobra.NoArgs,
 		Example: c.usage(),
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return c.run(cmd)
-		},
+		RunE:    c.run,
 	}
 
 	cmd.Flags().StringVar(&c.name, NameFlag, c.name, "Specify the name of the VM.")
@@ -295,8 +196,9 @@ func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	cmd.Flags().StringArrayVar(&c.pvcVolumes, PvcVolumeFlag, c.pvcVolumes, fmt.Sprintf("Specify a PVCs to be used by the VM. Can be provided multiple times.\nSupported parameters: %s", params.Supported(pvcVolume{})))
 	cmd.Flags().StringArrayVar(&c.blankVolumes, BlankVolumeFlag, c.blankVolumes, fmt.Sprintf("Specify a blank volume to be used by the VM. Can be provided multiple times.\nSupported parameters: %s", params.Supported(blankVolume{})))
 	cmd.Flags().StringArrayVar(&c.volumeImport, VolumeImportFlag, c.volumeImport, fmt.Sprintf(
-		"Specify the source for DataVolume. Can be provided multiple times.\nSupported parameters:\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s",
+		"Specify the source for DataVolume. Can be provided multiple times.\nSupported parameters:\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s\n  type %s - %s",
 		blank, params.Supported(dataVolumeSourceBlank{}),
+		gcs, params.Supported(dataVolumeSourceGcs{}),
 		http, params.Supported(dataVolumeSourceHttp{}),
 		imageIO, params.Supported(dataVolumeSourceImageIO{}),
 		pvc, params.Supported(dataVolumeSourcePVC{}),
@@ -355,7 +257,7 @@ func volumeShouldNotExist(flag string, vm *v1.VirtualMachine, name string) error
 
 func volumeValidToInferFrom(vm *v1.VirtualMachine, vol *v1.Volume) error {
 	if vol.DataVolume != nil {
-		return dataVolumeValidToInferFrom(vm, vol)
+		return dataVolumeValidToInferFrom(vm, vol.DataVolume.Name)
 	}
 
 	if vol.PersistentVolumeClaim != nil {
@@ -365,25 +267,22 @@ func volumeValidToInferFrom(vm *v1.VirtualMachine, vol *v1.Volume) error {
 	return fmt.Errorf(InvalidInferenceVolumeError)
 }
 
-func dataVolumeValidToInferFrom(vm *v1.VirtualMachine, vol *v1.Volume) error {
+func dataVolumeValidToInferFrom(vm *v1.VirtualMachine, name string) error {
 	for _, dvt := range vm.Spec.DataVolumeTemplates {
-		if dvt.Name == vol.DataVolume.Name {
-			if dvt.Spec.Source != nil && dvt.Spec.Source.PVC != nil {
+		if dvt.Name == name {
+			if dvt.Spec.Source != nil && (dvt.Spec.Source.PVC != nil || dvt.Spec.Source.Registry != nil || dvt.Spec.Source.Snapshot != nil) {
 				return nil
 			}
-
 			if dvt.Spec.SourceRef != nil && dvt.Spec.SourceRef.Kind == "DataSource" {
 				return nil
 			}
-
-			return fmt.Errorf(InvalidInferenceVolumeError)
+			return fmt.Errorf(DVInvalidInferenceVolumeError)
 		}
 	}
-
 	return nil
 }
 
-func (c *createVM) run(cmd *cobra.Command) error {
+func (c *createVM) run(cmd *cobra.Command, _ []string) error {
 	if err := c.setDefaults(cmd); err != nil {
 		return err
 	}
@@ -495,7 +394,6 @@ func (c *createVM) usage() string {
 }
 
 func (c *createVM) newVM() (*v1.VirtualMachine, error) {
-	runStrategy := v1.VirtualMachineRunStrategy(c.runStrategy)
 	memory, err := resource.ParseQuantity(c.memory)
 	if err != nil {
 		return nil, params.FlagErr(MemoryFlag, "%w", err)
@@ -511,7 +409,7 @@ func (c *createVM) newVM() (*v1.VirtualMachine, error) {
 			Name: c.name,
 		},
 		Spec: v1.VirtualMachineSpec{
-			RunStrategy: &runStrategy,
+			RunStrategy: pointer.P(v1.VirtualMachineRunStrategy((c.runStrategy))),
 			Template: &v1.VirtualMachineInstanceTemplateSpec{
 				Spec: v1.VirtualMachineInstanceSpec{
 					TerminationGracePeriodSeconds: &c.terminationGracePeriod,
@@ -661,8 +559,7 @@ func (c *createVM) getInferFromVolume(vm *v1.VirtualMachine) (string, error) {
 func withRunStrategy(c *createVM, vm *v1.VirtualMachine) error {
 	for _, runStrategy := range runStrategies {
 		if runStrategy == c.runStrategy {
-			vmRunStrategy := v1.VirtualMachineRunStrategy(c.runStrategy)
-			vm.Spec.RunStrategy = &vmRunStrategy
+			vm.Spec.RunStrategy = pointer.P(v1.VirtualMachineRunStrategy(c.runStrategy))
 			return nil
 		}
 	}
@@ -989,7 +886,7 @@ func withCloudInitNetworkData(c *createVM, vm *v1.VirtualMachine) error {
 
 func withCloudInitData(flag string, c *createVM, vm *v1.VirtualMachine) error {
 	// Make sure cloudInitDisk does not already exist
-	if err := volumeShouldNotExist(flag, vm, cloudInitDisk); err != nil {
+	if err := volumeShouldNotExist(flag, vm, CloudInitDisk); err != nil {
 		return err
 	}
 
@@ -1003,7 +900,7 @@ func withCloudInitData(flag string, c *createVM, vm *v1.VirtualMachine) error {
 		cloudInitNoCloud.UserDataBase64 = c.cloudInitUserData
 	}
 	vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, v1.Volume{
-		Name: cloudInitDisk,
+		Name: CloudInitDisk,
 		VolumeSource: v1.VolumeSource{
 			CloudInitNoCloud: cloudInitNoCloud,
 		},
@@ -1056,6 +953,26 @@ func withVolumeSourceBlank(paramStr string) (*cdiv1.DataVolumeSource, error) {
 
 	source := cdiv1.DataVolumeSource{
 		Blank: &cdiv1.DataVolumeBlankImage{},
+	}
+
+	return &source, nil
+}
+
+func withVolumeSourceGcs(paramStr string) (*cdiv1.DataVolumeSource, error) {
+	sourceStruct := dataVolumeSourceGcs{}
+	if err := params.Map(VolumeImportFlag, paramStr, &sourceStruct); err != nil {
+		return nil, err
+	}
+
+	if sourceStruct.URL == "" {
+		return nil, params.FlagErr(VolumeImportFlag, "URL is required with GCS volume source")
+	}
+
+	source := cdiv1.DataVolumeSource{
+		GCS: &cdiv1.DataVolumeSourceGCS{
+			URL:       sourceStruct.URL,
+			SecretRef: sourceStruct.SecretRef,
+		},
 	}
 
 	return &source, nil

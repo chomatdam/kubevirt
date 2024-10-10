@@ -25,10 +25,6 @@ import (
 	"fmt"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/libstorage"
-
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -36,14 +32,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
-	"k8s.io/utils/pointer"
-
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
+	putil "kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/tests/flags"
 	"kubevirt.io/kubevirt/tests/framework/checks"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libstorage"
 	"kubevirt.io/kubevirt/tests/util"
 )
 
@@ -55,7 +54,7 @@ var (
 func AdjustKubeVirtResource() {
 	virtClient := kubevirt.Client()
 
-	kv := util.GetCurrentKv(virtClient)
+	kv := libkubevirt.GetCurrentKv(virtClient)
 	originalKV = kv.DeepCopy()
 
 	KubeVirtDefaultConfig = originalKV.Spec.Configuration
@@ -88,12 +87,17 @@ func AdjustKubeVirtResource() {
 	kv.Spec.Configuration.SeccompConfiguration = &v1.SeccompConfiguration{
 		VirtualMachineInstanceProfile: &v1.VirtualMachineInstanceProfile{
 			CustomProfile: &v1.CustomProfile{
-				LocalhostProfile: pointer.String("kubevirt/kubevirt.json"),
+				LocalhostProfile: pointer.P("kubevirt/kubevirt.json"),
 			},
 		},
 	}
+	// Disable CPUManager Featuregate for s390x as it is not supported.
+	if putil.TranslateBuildArch() != "s390x" {
+		kv.Spec.Configuration.DeveloperConfiguration.FeatureGates = append(kv.Spec.Configuration.DeveloperConfiguration.FeatureGates,
+			virtconfig.CPUManager,
+		)
+	}
 	kv.Spec.Configuration.DeveloperConfiguration.FeatureGates = append(kv.Spec.Configuration.DeveloperConfiguration.FeatureGates,
-		virtconfig.CPUManager,
 		virtconfig.IgnitionGate,
 		virtconfig.SidecarGate,
 		virtconfig.SnapshotGate,
@@ -101,7 +105,6 @@ func AdjustKubeVirtResource() {
 		virtconfig.VirtIOFSGate,
 		virtconfig.HotplugVolumesGate,
 		virtconfig.DownwardMetricsFeatureGate,
-		virtconfig.NUMAFeatureGate,
 		virtconfig.ExpandDisksGate,
 		virtconfig.WorkloadEncryptionSEV,
 		virtconfig.VMExportGate,
@@ -121,7 +124,7 @@ func AdjustKubeVirtResource() {
 		testDefaultPermitSlirpInterface := true
 
 		kv.Spec.Configuration.NetworkConfiguration = &v1.NetworkConfiguration{
-			PermitSlirpInterface: &testDefaultPermitSlirpInterface,
+			DeprecatedPermitSlirpInterface: &testDefaultPermitSlirpInterface,
 		}
 	}
 
@@ -133,7 +136,7 @@ func AdjustKubeVirtResource() {
 	data, err := json.Marshal(kv.Spec)
 	Expect(err).ToNot(HaveOccurred())
 	patchData := fmt.Sprintf(`[{ "op": "replace", "path": "/spec", "value": %s }]`, string(data))
-	adjustedKV, err := virtClient.KubeVirt(kv.Namespace).Patch(kv.Name, types.JSONPatchType, []byte(patchData), &metav1.PatchOptions{})
+	adjustedKV, err := virtClient.KubeVirt(kv.Namespace).Patch(context.Background(), kv.Name, types.JSONPatchType, []byte(patchData), metav1.PatchOptions{})
 	util.PanicOnError(err)
 	KubeVirtDefaultConfig = adjustedKV.Spec.Configuration
 	if checks.HasFeature(virtconfig.CPUManager) {
@@ -159,7 +162,7 @@ func RestoreKubeVirtResource() {
 		data, err := json.Marshal(originalKV.Spec)
 		Expect(err).ToNot(HaveOccurred())
 		patchData := fmt.Sprintf(`[{ "op": "replace", "path": "/spec", "value": %s }]`, string(data))
-		_, err = virtClient.KubeVirt(originalKV.Namespace).Patch(originalKV.Name, types.JSONPatchType, []byte(patchData), &metav1.PatchOptions{})
+		_, err = virtClient.KubeVirt(originalKV.Namespace).Patch(context.Background(), originalKV.Name, types.JSONPatchType, []byte(patchData), metav1.PatchOptions{})
 		util.PanicOnError(err)
 	}
 }
@@ -167,7 +170,7 @@ func RestoreKubeVirtResource() {
 func ShouldAllowEmulation(virtClient kubecli.KubevirtClient) bool {
 	allowEmulation := false
 
-	kv := util.GetCurrentKv(virtClient)
+	kv := libkubevirt.GetCurrentKv(virtClient)
 	if kv.Spec.Configuration.DeveloperConfiguration != nil {
 		allowEmulation = kv.Spec.Configuration.DeveloperConfiguration.UseEmulation
 	}
@@ -180,7 +183,7 @@ func UpdateKubeVirtConfigValue(kvConfig v1.KubeVirtConfiguration) *v1.KubeVirt {
 
 	virtClient := kubevirt.Client()
 
-	kv := util.GetCurrentKv(virtClient)
+	kv := libkubevirt.GetCurrentKv(virtClient)
 	old, err := json.Marshal(kv)
 	Expect(err).ToNot(HaveOccurred())
 
@@ -198,7 +201,7 @@ func UpdateKubeVirtConfigValue(kvConfig v1.KubeVirtConfiguration) *v1.KubeVirt {
 	patch, err := strategicpatch.CreateTwoWayMergePatch(old, newJson, kv)
 	Expect(err).ToNot(HaveOccurred())
 
-	kv, err = virtClient.KubeVirt(kv.Namespace).Patch(kv.GetName(), types.MergePatchType, patch, &metav1.PatchOptions{})
+	kv, err = virtClient.KubeVirt(kv.Namespace).Patch(context.Background(), kv.GetName(), types.MergePatchType, patch, metav1.PatchOptions{})
 	Expect(err).ToNot(HaveOccurred())
 
 	return kv

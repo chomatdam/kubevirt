@@ -39,12 +39,15 @@ import (
 	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
-	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/clientcmd"
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/flags"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
 	"kubevirt.io/kubevirt/tests/libmonitoring"
+	"kubevirt.io/kubevirt/tests/libvmifact"
+	"kubevirt.io/kubevirt/tests/testsuite"
 	"kubevirt.io/kubevirt/tests/util"
 )
 
@@ -108,10 +111,10 @@ var _ = Describe("[Serial][sig-monitoring]Component Monitoring", Serial, decorat
 				},
 			},
 		}
-		originalKubeVirt := util.GetCurrentKv(virtClient)
+		originalKubeVirt := libkubevirt.GetCurrentKv(virtClient)
 		originalKubeVirt.Spec.Configuration.ControllerConfiguration = rateLimitConfig
 		originalKubeVirt.Spec.Configuration.HandlerConfiguration = rateLimitConfig
-		tests.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
+		config.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
 	}
 
 	Context("Up metrics", func() {
@@ -167,12 +170,16 @@ var _ = Describe("[Serial][sig-monitoring]Component Monitoring", Serial, decorat
 
 	Context("Errors metrics", func() {
 		var crb *rbacv1.ClusterRoleBinding
+		const operatorRoleBindingName = "kubevirt-operator-rolebinding"
+		var operatorRoleBinding *rbacv1.RoleBinding
 
 		BeforeEach(func() {
 			virtClient = kubevirt.Client()
 
 			crb, err = virtClient.RbacV1().ClusterRoleBindings().Get(context.Background(), "kubevirt-operator", metav1.GetOptions{})
 			util.PanicOnError(err)
+			operatorRoleBinding, err = virtClient.RbacV1().RoleBindings(flags.KubeVirtInstallNamespace).Get(context.Background(), operatorRoleBindingName, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
 
 			increaseRateLimit()
 
@@ -187,9 +194,13 @@ var _ = Describe("[Serial][sig-monitoring]Component Monitoring", Serial, decorat
 			crb.ObjectMeta.ResourceVersion = ""
 			crb.ObjectMeta.UID = ""
 			_, err = virtClient.RbacV1().ClusterRoleBindings().Create(context.Background(), crb, metav1.CreateOptions{})
-			if !errors.IsAlreadyExists(err) {
-				util.PanicOnError(err)
-			}
+			Expect(err).To(Or(Not(HaveOccurred()), MatchError(errors.IsAlreadyExists, "IsAlreadyExists")))
+
+			operatorRoleBinding.Annotations = nil
+			operatorRoleBinding.ObjectMeta.ResourceVersion = ""
+			operatorRoleBinding.ObjectMeta.UID = ""
+			_, err = virtClient.RbacV1().RoleBindings(flags.KubeVirtInstallNamespace).Create(context.Background(), operatorRoleBinding, metav1.CreateOptions{})
+			Expect(err).To(Or(Not(HaveOccurred()), MatchError(errors.IsAlreadyExists, "IsAlreadyExists")))
 			scales.RestoreAllScales()
 
 			time.Sleep(10 * time.Second)
@@ -213,6 +224,8 @@ var _ = Describe("[Serial][sig-monitoring]Component Monitoring", Serial, decorat
 			scales.RestoreScale(virtOperator.deploymentName)
 			err = virtClient.RbacV1().ClusterRoleBindings().Delete(context.Background(), crb.Name, metav1.DeleteOptions{})
 			Expect(err).ToNot(HaveOccurred())
+			err = virtClient.RbacV1().RoleBindings(flags.KubeVirtInstallNamespace).Delete(context.Background(), operatorRoleBindingName, metav1.DeleteOptions{})
+			Expect(err).ToNot(HaveOccurred())
 
 			Eventually(func(g Gomega) {
 				g.Expect(libmonitoring.CheckAlertExists(virtClient, virtOperator.restErrorsBurtsAlert)).To(BeTrue())
@@ -220,63 +233,34 @@ var _ = Describe("[Serial][sig-monitoring]Component Monitoring", Serial, decorat
 			}, 5*time.Minute, 500*time.Millisecond).Should(Succeed())
 		})
 
-		It("VirtControllerRESTErrorsBurst and VirtControllerRESTErrorsHigh should be triggered when requests to virt-controller are failing", func() {
+		PIt("VirtControllerRESTErrorsBurst and VirtControllerRESTErrorsHigh should be triggered when requests to virt-controller are failing", func() {
 			err = virtClient.RbacV1().ClusterRoleBindings().Delete(context.Background(), "kubevirt-controller", metav1.DeleteOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
-			vmi := tests.NewRandomVMI()
+			vmi := libvmifact.NewGuestless()
 
 			Eventually(func(g Gomega) {
-				_, _ = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(context.Background(), vmi)
-				_ = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Delete(context.Background(), vmi.Name, &metav1.DeleteOptions{})
+				_, _ = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Create(context.Background(), vmi, metav1.CreateOptions{})
+				_ = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Delete(context.Background(), vmi.Name, metav1.DeleteOptions{})
 
 				g.Expect(libmonitoring.CheckAlertExists(virtClient, virtController.restErrorsBurtsAlert)).To(BeTrue())
 				g.Expect(libmonitoring.CheckAlertExists(virtClient, virtController.restErrorsHighAlert)).To(BeTrue())
 			}, 5*time.Minute, 500*time.Millisecond).Should(Succeed())
 		})
 
-		It("VirtHandlerRESTErrorsBurst and VirtHandlerRESTErrorsHigh should be triggered when requests to virt-handler are failing", func() {
+		PIt("VirtHandlerRESTErrorsBurst and VirtHandlerRESTErrorsHigh should be triggered when requests to virt-handler are failing", func() {
 			err = virtClient.RbacV1().ClusterRoleBindings().Delete(context.Background(), "kubevirt-handler", metav1.DeleteOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
-			vmi := tests.NewRandomVMI()
+			vmi := libvmifact.NewGuestless()
 
 			Eventually(func(g Gomega) {
-				_, _ = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(context.Background(), vmi)
-				_ = virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Delete(context.Background(), vmi.Name, &metav1.DeleteOptions{})
+				_, _ = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Create(context.Background(), vmi, metav1.CreateOptions{})
+				_ = virtClient.VirtualMachineInstance(testsuite.NamespaceTestDefault).Delete(context.Background(), vmi.Name, metav1.DeleteOptions{})
 
 				g.Expect(libmonitoring.CheckAlertExists(virtClient, virtHandler.restErrorsBurtsAlert)).To(BeTrue())
 				g.Expect(libmonitoring.CheckAlertExists(virtClient, virtHandler.restErrorsHighAlert)).To(BeTrue())
 			}, 5*time.Minute, 500*time.Millisecond).Should(Succeed())
-		})
-	})
-
-	Context("Resource metrics", func() {
-		var resourceAlerts = []string{
-			"KubeVirtComponentExceedsRequestedCPU",
-			"KubeVirtComponentExceedsRequestedMemory",
-		}
-
-		BeforeEach(func() {
-			virtClient = kubevirt.Client()
-			scales = libmonitoring.NewScaling(virtClient, []string{virtOperator.deploymentName})
-			scales.UpdateScale(virtOperator.deploymentName, int32(0))
-			libmonitoring.ReduceAlertPendingTime(virtClient)
-		})
-
-		AfterEach(func() {
-			scales.RestoreAllScales()
-			time.Sleep(10 * time.Second)
-			libmonitoring.WaitUntilAlertDoesNotExist(virtClient, resourceAlerts...)
-		})
-
-		It("KubeVirtComponentExceedsRequestedCPU should be triggered when virt-api exceeds requested CPU", func() {
-			By("updating virt-api deployment CPU and Memory requests")
-			updateDeploymentResourcesRequest(virtClient, virtApi.deploymentName, resource.MustParse("0m"), resource.MustParse("0Mi"))
-
-			By("waiting for KubeVirtComponentExceedsRequestedCPU and KubeVirtComponentExceedsRequestedMemory alerts")
-			libmonitoring.VerifyAlertExist(virtClient, "KubeVirtComponentExceedsRequestedCPU")
-			libmonitoring.VerifyAlertExist(virtClient, "KubeVirtComponentExceedsRequestedMemory")
 		})
 	})
 })
@@ -294,13 +278,7 @@ func updateDeploymentResourcesRequest(virtClient kubecli.KubevirtClient, deploym
 }
 
 func patchDeployment(virtClient kubecli.KubevirtClient, deployment *appsv1.Deployment) {
-	patchOp := patch.PatchOperation{
-		Op:    "replace",
-		Path:  "/spec",
-		Value: deployment.Spec,
-	}
-
-	payload, err := patch.GeneratePatchPayload(patchOp)
+	payload, err := patch.New(patch.WithReplace("/spec", deployment.Spec)).GeneratePayload()
 	Expect(err).ToNot(HaveOccurred())
 
 	_, err = virtClient.AppsV1().Deployments(flags.KubeVirtInstallNamespace).Patch(context.Background(), deployment.Name, types.JSONPatchType, payload, metav1.PatchOptions{})

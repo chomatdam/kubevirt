@@ -34,10 +34,10 @@ import (
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/tests/exec"
 	"kubevirt.io/kubevirt/tests/flags"
 	. "kubevirt.io/kubevirt/tests/framework/matcher"
@@ -68,7 +68,7 @@ func ExecuteCommandInVirtHandlerPod(nodeName string, args []string) (stdout stri
 		return stdout, err
 	}
 
-	stdout, stderr, err := exec.ExecuteCommandOnPodWithResults(virtClient, pod, "virt-handler", args)
+	stdout, stderr, err := exec.ExecuteCommandOnPodWithResults(pod, "virt-handler", args)
 	if err != nil {
 		return stdout, fmt.Errorf("Failed excuting command=%v, error=%v, stdout=%s, stderr=%s", args, err, stdout, stderr)
 	}
@@ -161,13 +161,13 @@ func executeDeviceMapperOnNode(nodeName string, cmd []string) {
 					Image:   image,
 					Command: cmd,
 					SecurityContext: &k8sv1.SecurityContext{
-						Privileged: pointer.BoolPtr(true),
-						RunAsUser:  pointer.Int64Ptr(0),
+						Privileged: pointer.P(true),
+						RunAsUser:  pointer.P(int64(0)),
 					},
 				},
 			},
 			NodeSelector: map[string]string{
-				"kubernetes.io/hostname": nodeName,
+				k8sv1.LabelHostname: nodeName,
 			},
 		},
 	}
@@ -196,7 +196,7 @@ func CreatePVwithSCSIDisk(storageClass, pvName, nodeName, devicePath string) (*c
 				{
 					MatchExpressions: []corev1.NodeSelectorRequirement{
 						{
-							Key:      "kubernetes.io/hostname",
+							Key:      k8sv1.LabelHostname,
 							Operator: corev1.NodeSelectorOpIn,
 							Values:   []string{nodeName},
 						},
@@ -241,7 +241,7 @@ func CreatePVandPVCwithSCSIDisk(nodeName, devicePath, namespace, storageClass, p
 			VolumeMode:       pv.Spec.VolumeMode,
 			StorageClassName: &storageClass,
 			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.ResourceRequirements{
+			Resources: corev1.VolumeResourceRequirements{
 				Requests: map[corev1.ResourceName]resource.Quantity{corev1.ResourceStorage: pv.Spec.Capacity["storage"]},
 			},
 		},

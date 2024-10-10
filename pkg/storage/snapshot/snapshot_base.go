@@ -34,13 +34,12 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	kubevirtv1 "kubevirt.io/api/core/v1"
-	snapshotv1 "kubevirt.io/api/snapshot/v1alpha1"
+	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	"kubevirt.io/kubevirt/pkg/controller"
-	"kubevirt.io/kubevirt/pkg/util/status"
 	watchutil "kubevirt.io/kubevirt/pkg/virt-controller/watch/util"
 )
 
@@ -92,8 +91,6 @@ type VMSnapshotController struct {
 
 	dynamicInformerMap map[string]*dynamicInformer
 	eventHandlerMap    map[string]cache.ResourceEventHandlerFuncs
-
-	vmStatusUpdater *status.VMStatusUpdater
 }
 
 var supportedCRDVersions = []string{"v1"}
@@ -151,6 +148,7 @@ func (ctrl *VMSnapshotController) Init() error {
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    ctrl.handleVM,
 			UpdateFunc: func(oldObj, newObj interface{}) { ctrl.handleVM(newObj) },
+			DeleteFunc: ctrl.handleVM,
 		},
 		ctrl.ResyncPeriod,
 	)
@@ -162,6 +160,7 @@ func (ctrl *VMSnapshotController) Init() error {
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    ctrl.handleVMI,
 			UpdateFunc: func(oldObj, newObj interface{}) { ctrl.handleVMI(newObj) },
+			DeleteFunc: ctrl.handleVMI,
 		},
 		ctrl.ResyncPeriod,
 	)
@@ -205,7 +204,6 @@ func (ctrl *VMSnapshotController) Init() error {
 		return err
 	}
 
-	ctrl.vmStatusUpdater = status.NewVMStatusUpdater(ctrl.Client)
 	return nil
 }
 
@@ -559,7 +557,6 @@ func (ctrl *VMSnapshotController) handleDV(obj interface{}) {
 	if dv, ok := obj.(*cdiv1.DataVolume); ok {
 		key, _ := cache.MetaNamespaceKeyFunc(dv)
 		log.Log.V(3).Infof("Processing DV %s", key)
-		// TODO come back when DV/PVC name may differ
 		for _, idx := range []string{"dv", "pvc"} {
 			keys, err := ctrl.VMInformer.GetIndexer().IndexKeys(idx, key)
 			if err != nil {

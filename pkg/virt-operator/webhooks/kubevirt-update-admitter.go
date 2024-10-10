@@ -34,7 +34,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/pointer"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -44,6 +43,7 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	validating_webhooks "kubevirt.io/kubevirt/pkg/util/webhooks/validating-webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/apply"
@@ -63,7 +63,7 @@ func NewKubeVirtUpdateAdmitter(client kubecli.KubevirtClient, clusterConfig *vir
 	}
 }
 
-func (admitter *KubeVirtUpdateAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+func (admitter *KubeVirtUpdateAdmitter) Admit(ctx context.Context, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	// Get new and old KubeVirt from admission response
 	newKV, currKV, err := getAdmissionReviewKubeVirt(ar)
 	if err != nil {
@@ -90,14 +90,14 @@ func (admitter *KubeVirtUpdateAdmitter) Admit(ar *admissionv1.AdmissionReview) *
 	if !equality.Semantic.DeepEqual(currKV.Spec.Infra, newKV.Spec.Infra) {
 		if newKV.Spec.Infra != nil && newKV.Spec.Infra.NodePlacement != nil {
 			results = append(results,
-				validateInfraPlacement(newKV.Namespace, newKV.Spec.Infra.NodePlacement, admitter.Client)...)
+				validateInfraPlacement(ctx, newKV.Namespace, newKV.Spec.Infra.NodePlacement, admitter.Client)...)
 		}
 	}
 
 	if !equality.Semantic.DeepEqual(currKV.Spec.Workloads, newKV.Spec.Workloads) {
 		if newKV.Spec.Workloads != nil && newKV.Spec.Workloads.NodePlacement != nil {
 			results = append(results,
-				validateWorkloadPlacement(newKV.Namespace, newKV.Spec.Workloads.NodePlacement, admitter.Client)...)
+				validateWorkloadPlacement(ctx, newKV.Namespace, newKV.Spec.Workloads.NodePlacement, admitter.Client)...)
 		}
 	}
 
@@ -309,7 +309,7 @@ func validateSeccompConfiguration(field *field.Path, seccompConf *v1.SeccompConf
 
 }
 
-func validateWorkloadPlacement(namespace string, placementConfig *v1.NodePlacement, client kubecli.KubevirtClient) []metav1.StatusCause {
+func validateWorkloadPlacement(ctx context.Context, namespace string, placementConfig *v1.NodePlacement, client kubecli.KubevirtClient) []metav1.StatusCause {
 	statuses := []metav1.StatusCause{}
 
 	const (
@@ -352,7 +352,7 @@ func validateWorkloadPlacement(namespace string, placementConfig *v1.NodePlaceme
 		},
 	}
 
-	_, err := client.AppsV1().DaemonSets(namespace).Create(context.Background(), mockDaemonSet, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+	_, err := client.AppsV1().DaemonSets(namespace).Create(ctx, mockDaemonSet, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
 
 	if err != nil {
 		statuses = append(statuses, metav1.StatusCause{
@@ -363,7 +363,7 @@ func validateWorkloadPlacement(namespace string, placementConfig *v1.NodePlaceme
 	return statuses
 }
 
-func validateInfraPlacement(namespace string, placementConfig *v1.NodePlacement, client kubecli.KubevirtClient) []metav1.StatusCause {
+func validateInfraPlacement(ctx context.Context, namespace string, placementConfig *v1.NodePlacement, client kubecli.KubevirtClient) []metav1.StatusCause {
 	statuses := []metav1.StatusCause{}
 
 	const (
@@ -378,7 +378,7 @@ func validateInfraPlacement(namespace string, placementConfig *v1.NodePlacement,
 			Name: deploymentName,
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: pointer.Int32Ptr(1),
+			Replicas: pointer.P(int32(1)),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					mockLabel: "",
@@ -407,7 +407,7 @@ func validateInfraPlacement(namespace string, placementConfig *v1.NodePlacement,
 		},
 	}
 
-	_, err := client.AppsV1().Deployments(namespace).Create(context.Background(), mockDeployment, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+	_, err := client.AppsV1().Deployments(namespace).Create(ctx, mockDeployment, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
 
 	if err != nil {
 		statuses = append(statuses, metav1.StatusCause{

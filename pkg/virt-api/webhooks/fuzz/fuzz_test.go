@@ -1,6 +1,7 @@
 package fuzz
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -44,7 +45,7 @@ func FuzzAdmitter(f *testing.F) {
 			objType: &v1.VirtualMachineInstance{},
 			admit: func(config *virtconfig.ClusterConfig, request *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 				adm := &admitters.VMICreateAdmitter{ClusterConfig: config}
-				return adm.Admit(request)
+				return adm.Admit(context.Background(), request)
 			},
 			fuzzFuncs: fuzzFuncs(withSyntaxErrors),
 		},
@@ -54,7 +55,7 @@ func FuzzAdmitter(f *testing.F) {
 			objType: &v1.VirtualMachineInstance{},
 			admit: func(config *virtconfig.ClusterConfig, request *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 				adm := &admitters.VMICreateAdmitter{ClusterConfig: config}
-				return adm.Admit(request)
+				return adm.Admit(context.Background(), request)
 			},
 			fuzzFuncs: fuzzFuncs(),
 		},
@@ -67,7 +68,7 @@ func FuzzAdmitter(f *testing.F) {
 					ClusterConfig:       config,
 					InstancetypeMethods: testutils.NewMockInstancetypeMethods(),
 				}
-				return adm.Admit(request)
+				return adm.Admit(context.Background(), request)
 			},
 			fuzzFuncs: fuzzFuncs(withSyntaxErrors),
 		},
@@ -80,7 +81,7 @@ func FuzzAdmitter(f *testing.F) {
 					ClusterConfig:       config,
 					InstancetypeMethods: testutils.NewMockInstancetypeMethods(),
 				}
-				return adm.Admit(request)
+				return adm.Admit(context.Background(), request)
 			},
 			fuzzFuncs: fuzzFuncs(),
 		},
@@ -164,14 +165,13 @@ func fuzzKubeVirtConfig(seed int64) *virtconfig.ClusterConfig {
 			featureGates := []string{
 				virtconfig.ExpandDisksGate,
 				virtconfig.CPUManager,
-				virtconfig.NUMAFeatureGate,
+				deprecation.NUMAFeatureGate,
 				virtconfig.IgnitionGate,
 				deprecation.LiveMigrationGate,
 				deprecation.SRIOVLiveMigrationGate,
 				deprecation.CPUNodeDiscoveryGate,
 				virtconfig.HypervStrictCheckGate,
 				virtconfig.SidecarGate,
-				virtconfig.GPUGate,
 				virtconfig.HostDevicesGate,
 				virtconfig.SnapshotGate,
 				virtconfig.VMExportGate,
@@ -185,7 +185,7 @@ func fuzzKubeVirtConfig(seed int64) *virtconfig.ClusterConfig {
 				virtconfig.Root,
 				virtconfig.ClusterProfiler,
 				virtconfig.WorkloadEncryptionSEV,
-				virtconfig.DockerSELinuxMCSWorkaround,
+				deprecation.DockerSELinuxMCSWorkaround,
 				deprecation.PSA,
 				virtconfig.VSOCKGate,
 			}

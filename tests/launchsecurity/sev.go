@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"kubevirt.io/kubevirt/tests/decorators"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
+	"kubevirt.io/kubevirt/tests/libvmops"
 	"kubevirt.io/kubevirt/tests/testsuite"
 
 	expect "github.com/google/goexpect"
@@ -31,6 +33,7 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/pkg/libvmi"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
@@ -39,7 +42,7 @@ import (
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	. "kubevirt.io/kubevirt/tests/framework/matcher"
 	"kubevirt.io/kubevirt/tests/libpod"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
 )
 
@@ -55,7 +58,7 @@ var _ = Describe("[sig-compute]AMD Secure Encrypted Virtualization (SEV)", decor
 			libvmi.WithSEV(withES),
 		}
 		opts = append(sevOptions, opts...)
-		return libvmi.NewFedora(opts...)
+		return libvmifact.NewFedora(opts...)
 	}
 
 	// As per section 6.5 LAUNCH_MEASURE of the AMD SEV specification the launch
@@ -222,10 +225,9 @@ var _ = Describe("[sig-compute]AMD Secure Encrypted Virtualization (SEV)", decor
 
 		execOnHelperPod := func(command string) (string, error) {
 			stdout, err := exec.ExecuteCommandOnPod(
-				virtClient,
 				helperPod,
 				helperPod.Spec.Containers[0].Name,
-				[]string{tests.BinBash, "-c", command})
+				[]string{"/bin/bash", "-c", command})
 			return strings.TrimSpace(stdout), err
 		}
 
@@ -301,7 +303,7 @@ var _ = Describe("[sig-compute]AMD Secure Encrypted Virtualization (SEV)", decor
 
 		It("should reset SEV allocatable devices when the feature gate is disabled", func() {
 			By(fmt.Sprintf("Disabling %s feature gate", virtconfig.WorkloadEncryptionSEV))
-			tests.DisableFeatureGate(virtconfig.WorkloadEncryptionSEV)
+			config.DisableFeatureGate(virtconfig.WorkloadEncryptionSEV)
 			Eventually(func() bool {
 				node, err := virtClient.CoreV1().Nodes().Get(context.Background(), nodeName, k8smetav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -322,7 +324,7 @@ var _ = Describe("[sig-compute]AMD Secure Encrypted Virtualization (SEV)", decor
 					checks.SkipTestIfNotSEVESCapable()
 				}
 				vmi := newSEVFedora(withES)
-				vmi = tests.RunVMIAndExpectLaunch(vmi, 240)
+				vmi = libvmops.RunVMIAndExpectLaunch(vmi, 240)
 
 				By("Expecting the VirtualMachineInstance console")
 				Expect(console.LoginToFedora(vmi)).To(Succeed())
@@ -354,19 +356,19 @@ var _ = Describe("[sig-compute]AMD Secure Encrypted Virtualization (SEV)", decor
 			Expect(err).ToNot(HaveOccurred())
 
 			vmi := newSEVFedora(false, libvmi.WithSEVAttestation())
-			vmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
+			vmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi, k8smetav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			Eventually(ThisVMI(vmi), 60).Should(BeInPhase(v1.Scheduled))
 
 			By("Querying virsh nodesevinfo")
-			nodeSevInfo := tests.RunCommandOnVmiPod(vmi, []string{"virsh", "nodesevinfo"})
+			nodeSevInfo := libpod.RunCommandOnVmiPod(vmi, []string{"virsh", "nodesevinfo"})
 			Expect(nodeSevInfo).ToNot(BeEmpty())
 			entries := parseVirshInfo(nodeSevInfo, []string{"pdh", "cert-chain"})
 			expectedSEVPlatformInfo.PDH = entries["pdh"]
 			expectedSEVPlatformInfo.CertChain = entries["cert-chain"]
 
 			By("Fetching platform certificates")
-			sevPlatformInfo, err := virtClient.VirtualMachineInstance(vmi.Namespace).SEVFetchCertChain(vmi.Name)
+			sevPlatformInfo, err := virtClient.VirtualMachineInstance(vmi.Namespace).SEVFetchCertChain(context.Background(), vmi.Name)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sevPlatformInfo).To(Equal(expectedSEVPlatformInfo))
 
@@ -374,12 +376,12 @@ var _ = Describe("[sig-compute]AMD Secure Encrypted Virtualization (SEV)", decor
 			vmi, err = ThisVMI(vmi)()
 			Expect(err).ToNot(HaveOccurred())
 			sevSessionOptions, tikBase64, tekBase64 := prepareSession(virtClient, vmi.Status.NodeName, sevPlatformInfo.PDH)
-			err = virtClient.VirtualMachineInstance(vmi.Namespace).SEVSetupSession(vmi.Name, sevSessionOptions)
+			err = virtClient.VirtualMachineInstance(vmi.Namespace).SEVSetupSession(context.Background(), vmi.Name, sevSessionOptions)
 			Expect(err).ToNot(HaveOccurred())
 			Eventually(ThisVMI(vmi), 60).Should(And(BeRunning(), HaveConditionTrue(v1.VirtualMachineInstancePaused)))
 
 			By("Querying virsh domlaunchsecinfo 1")
-			domLaunchSecInfo := tests.RunCommandOnVmiPod(vmi, []string{"virsh", "domlaunchsecinfo", "1"})
+			domLaunchSecInfo := libpod.RunCommandOnVmiPod(vmi, []string{"virsh", "domlaunchsecinfo", "1"})
 			Expect(domLaunchSecInfo).ToNot(BeEmpty())
 			entries = parseVirshInfo(domLaunchSecInfo, []string{
 				"sev-measurement", "sev-api-major", "sev-api-minor", "sev-build-id", "sev-policy",
@@ -397,20 +399,20 @@ var _ = Describe("[sig-compute]AMD Secure Encrypted Virtualization (SEV)", decor
 			Expect(domainSpec.OS.BootLoader.Path).ToNot(BeEmpty())
 
 			By(fmt.Sprintf("Computing sha256sum %s", domainSpec.OS.BootLoader.Path))
-			sha256sum := tests.RunCommandOnVmiPod(vmi, []string{"sha256sum", domainSpec.OS.BootLoader.Path})
+			sha256sum := libpod.RunCommandOnVmiPod(vmi, []string{"sha256sum", domainSpec.OS.BootLoader.Path})
 			Expect(sha256sum).ToNot(BeEmpty())
 			expectedSEVMeasurementInfo.LoaderSHA = strings.TrimSpace(strings.Split(sha256sum, " ")[0])
 			Expect(expectedSEVMeasurementInfo.LoaderSHA).To(HaveLen(64))
 
 			By("Querying launch measurement")
-			sevMeasurementInfo, err := virtClient.VirtualMachineInstance(vmi.Namespace).SEVQueryLaunchMeasurement(vmi.Name)
+			sevMeasurementInfo, err := virtClient.VirtualMachineInstance(vmi.Namespace).SEVQueryLaunchMeasurement(context.Background(), vmi.Name)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sevMeasurementInfo).To(Equal(expectedSEVMeasurementInfo))
 			measure := verifyMeasurement(&sevMeasurementInfo, tikBase64)
 			sevSecretOptions := encryptSecret(diskSecret, measure, tikBase64, tekBase64)
 
 			By("Injecting launch secret")
-			err = virtClient.VirtualMachineInstance(vmi.Namespace).SEVInjectLaunchSecret(vmi.Name, sevSecretOptions)
+			err = virtClient.VirtualMachineInstance(vmi.Namespace).SEVInjectLaunchSecret(context.Background(), vmi.Name, sevSecretOptions)
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Unpausing the VirtualMachineInstance")

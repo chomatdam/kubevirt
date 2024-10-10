@@ -36,7 +36,6 @@ import (
 	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
 	"kubevirt.io/kubevirt/pkg/virt-handler/seccomp"
 	"kubevirt.io/kubevirt/pkg/virt-handler/vsock"
-	"kubevirt.io/kubevirt/pkg/watchdog"
 
 	"github.com/emicklei/go-restful/v3"
 	"github.com/golang/glog"
@@ -50,12 +49,11 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/certificate"
 	"k8s.io/client-go/util/flowcontrol"
+	"libvirt.org/go/libvirtxml"
 
 	"kubevirt.io/kubevirt/pkg/safepath"
 
 	"kubevirt.io/kubevirt/pkg/util/ratelimiter"
-
-	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/api"
 
 	"kubevirt.io/kubevirt/pkg/monitoring/domainstats/downwardmetrics"
 
@@ -71,11 +69,12 @@ import (
 	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/controller"
-	_ "kubevirt.io/kubevirt/pkg/monitoring/client/prometheus"               // import for prometheus metrics
-	promdomain "kubevirt.io/kubevirt/pkg/monitoring/domainstats/prometheus" // import for prometheus metrics
+	clientmetrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/common/client"
+	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-handler"
+	metricshandler "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-handler/handler"
 	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
-	_ "kubevirt.io/kubevirt/pkg/monitoring/reflector/prometheus" // import for prometheus metrics
-	_ "kubevirt.io/kubevirt/pkg/monitoring/workqueue/prometheus" // import for prometheus metrics
+	"kubevirt.io/kubevirt/pkg/network/netbinding"
+	netsetup "kubevirt.io/kubevirt/pkg/network/setup"
 	"kubevirt.io/kubevirt/pkg/service"
 	"kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -215,6 +214,7 @@ func (app *virtHandlerApp) Run() {
 	}
 
 	app.reloadableRateLimiter = ratelimiter.NewReloadableRateLimiter(flowcontrol.NewTokenBucketRateLimiter(virtconfig.DefaultVirtHandlerQPS, virtconfig.DefaultVirtHandlerBurst))
+	clientmetrics.RegisterRestConfigHooks()
 	clientConfig, err := kubecli.GetKubevirtClientConfig()
 	if err != nil {
 		panic(err)
@@ -256,13 +256,7 @@ func (app *virtHandlerApp) Run() {
 	vmiTargetInformer := factory.VMITargetHost(app.HostOverride)
 
 	// Wire Domain controller
-	domainSharedInformer, err := virtcache.NewSharedInformer(app.VirtShareDir, int(app.WatchdogTimeoutDuration.Seconds()), recorder, vmiSourceInformer.GetStore(), time.Duration(app.domainResyncPeriodSeconds)*time.Second)
-	if err != nil {
-		panic(err)
-	}
-
-	// Legacy directory for watchdog files
-	err = os.MkdirAll(watchdog.WatchdogFileDirectory(app.VirtShareDir), 0755)
+	domainSharedInformer := virtcache.NewSharedInformer(app.VirtShareDir, int(app.WatchdogTimeoutDuration.Seconds()), recorder, vmiSourceInformer.GetStore(), time.Duration(app.domainResyncPeriodSeconds)*time.Second)
 	if err != nil {
 		panic(err)
 	}
@@ -276,12 +270,7 @@ func (app *virtHandlerApp) Run() {
 	}
 
 	cmdclient.SetPodsBaseDir("/pods")
-	cmdclient.SetLegacyBaseDir(app.VirtShareDir)
 	containerdisk.SetKubeletPodsDirectory(app.KubeletPodsDir)
-	err = os.MkdirAll(cmdclient.LegacySocketsDirectory(), 0755)
-	if err != nil {
-		panic(err)
-	}
 
 	if err := app.prepareCertManager(); err != nil {
 		glog.Fatalf("Error preparing the certificate manager: %v", err)
@@ -316,17 +305,31 @@ func (app *virtHandlerApp) Run() {
 
 	stop := make(chan struct{})
 	defer close(stop)
-	var capabilities *api.Capabilities
+	var capabilities libvirtxml.Caps
 	var hostCpuModel string
-	nodeLabellerrecorder := broadcaster.NewRecorder(scheme.Scheme, k8sv1.EventSource{Component: "node-labeller", Host: app.HostOverride})
-	nodeLabellerController, err := nodelabeller.NewNodeLabeller(app.clusterConfig, app.virtCli.CoreV1().Nodes(), app.HostOverride, nodeLabellerrecorder)
+
+	hostCapsFile, err := os.ReadFile(filepath.Join(nodelabeller.NodeLabellerVolumePath, "capabilities.xml"))
 	if err != nil {
 		panic(err)
 	}
-	capabilities = nodeLabellerController.HostCapabilities()
 
-	// Node labelling is only relevant on x86_64 arch.
-	if virtconfig.IsAMD64(runtime.GOARCH) {
+	if err := capabilities.Unmarshal(string(hostCapsFile)); err != nil {
+		panic(err)
+	}
+
+	nodeLabellerrecorder := broadcaster.NewRecorder(scheme.Scheme, k8sv1.EventSource{Component: "node-labeller", Host: app.HostOverride})
+	nodeLabellerController, err := nodelabeller.NewNodeLabeller(app.clusterConfig,
+		app.virtCli.CoreV1().Nodes(),
+		app.HostOverride,
+		nodeLabellerrecorder,
+		capabilities.Host.CPU.Counter,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	// Node labelling is only relevant on x86_64 and s390x arches.
+	if virtconfig.IsAMD64(runtime.GOARCH) || virtconfig.IsS390X(runtime.GOARCH) {
 		hostCpuModel = nodeLabellerController.GetHostCpuModel().Name
 
 		go nodeLabellerController.Run(10, stop)
@@ -351,14 +354,16 @@ func (app *virtHandlerApp) Run() {
 		vmiSourceInformer,
 		vmiTargetInformer,
 		domainSharedInformer,
-		int(app.WatchdogTimeoutDuration.Seconds()),
 		app.MaxDevices,
 		app.clusterConfig,
 		podIsolationDetector,
 		migrationProxy,
 		downwardMetricsManager,
-		capabilities,
+		&capabilities,
 		hostCpuModel,
+		netsetup.NewNetConf(),
+		netsetup.NewNetStat(),
+		netbinding.MemoryCalculator{},
 	)
 	if err != nil {
 		panic(err)
@@ -369,14 +374,9 @@ func (app *virtHandlerApp) Run() {
 
 	lifecycleHandler := rest.NewLifecycleHandler(
 		recorder,
-		vmiSourceInformer,
+		vmiSourceInformer.GetStore(),
 		app.VirtShareDir,
 	)
-
-	promdomain.SetupDomainStatsCollector(app.virtCli, app.VirtShareDir, app.HostOverride, app.MaxRequestsInFlight, vmiSourceInformer)
-	if err := downwardmetrics.RunDownwardMetricsCollector(context.Background(), app.HostOverride, vmiSourceInformer, podIsolationDetector); err != nil {
-		panic(fmt.Errorf("failed to set up the downwardMetrics collector: %v", err))
-	}
 
 	go app.clientcertmanager.Start()
 	go app.servercertmanager.Start()
@@ -409,6 +409,14 @@ func (app *virtHandlerApp) Run() {
 
 	cache.WaitForCacheSync(stop, vmiSourceInformer.HasSynced, factory.CRD().HasSynced, factory.KubeVirt().HasSynced)
 
+	if err := metrics.SetupMetrics(app.VirtShareDir, app.HostOverride, app.MaxRequestsInFlight, vmiSourceInformer); err != nil {
+		panic(err)
+	}
+
+	if err := downwardmetrics.RunDownwardMetricsCollector(context.Background(), app.HostOverride, vmiSourceInformer, podIsolationDetector); err != nil {
+		panic(fmt.Errorf("failed to set up the downwardMetrics collector: %v", err))
+	}
+
 	// This callback can only be called only after the KubeVirt CR has synced,
 	// to avoid installing the SELinux policy when the feature gate is set
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldInstallSELinuxPolicy)
@@ -420,7 +428,7 @@ func (app *virtHandlerApp) Run() {
 
 	consoleHandler := rest.NewConsoleHandler(
 		podIsolationDetector,
-		vmiSourceInformer,
+		vmiSourceInformer.GetStore(),
 		app.clientcertmanager,
 	)
 
@@ -541,7 +549,7 @@ func (app *virtHandlerApp) runPrometheusServer(errCh chan error) {
 
 	mux.Add(webService)
 	log.Log.V(1).Infof("metrics: max concurrent requests=%d", app.MaxRequestsInFlight)
-	mux.Handle("/metrics", promdomain.Handler(app.MaxRequestsInFlight))
+	mux.Handle("/metrics", metricshandler.Handler(app.MaxRequestsInFlight))
 	server := http.Server{
 		Addr:      app.ServiceListen.Address(),
 		Handler:   mux,

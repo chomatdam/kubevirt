@@ -34,7 +34,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 
 	kubevirtv1 "kubevirt.io/api/core/v1"
-	snapshotv1 "kubevirt.io/api/snapshot/v1alpha1"
+	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/controller"
@@ -113,13 +113,15 @@ func (s *vmSnapshotSource) Lock() (bool, error) {
 		// unfortunately, status updater does not return the updated resource
 		// but the controller is watching VMs so will get notified
 		// returning here because following Update will always block
-		return false, s.controller.vmStatusUpdater.UpdateStatus(vmCopy)
+		_, err := s.controller.Client.VirtualMachine(vmCopy.Namespace).UpdateStatus(context.Background(), vmCopy, metav1.UpdateOptions{})
+
+		return false, err
 	}
 
 	if !controller.HasFinalizer(vmCopy, sourceFinalizer) {
 		log.Log.Infof("Adding VM snapshot finalizer to %s", s.vm.Name)
 		controller.AddFinalizer(vmCopy, sourceFinalizer)
-		_, err = s.controller.Client.VirtualMachine(vmCopy.Namespace).Update(context.Background(), vmCopy)
+		_, err = s.controller.Client.VirtualMachine(vmCopy.Namespace).Update(context.Background(), vmCopy, metav1.UpdateOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -138,19 +140,16 @@ func (s *vmSnapshotSource) Unlock() (bool, error) {
 
 	if controller.HasFinalizer(vmCopy, sourceFinalizer) {
 		controller.RemoveFinalizer(vmCopy, sourceFinalizer)
-		vmCopy, err = s.controller.Client.VirtualMachine(vmCopy.Namespace).Update(context.Background(), vmCopy)
+		vmCopy, err = s.controller.Client.VirtualMachine(vmCopy.Namespace).Update(context.Background(), vmCopy, metav1.UpdateOptions{})
 		if err != nil {
 			return false, err
 		}
 	}
 
 	vmCopy.Status.SnapshotInProgress = nil
-	err = s.controller.vmStatusUpdater.UpdateStatus(vmCopy)
-	if err != nil {
-		return true, err
-	}
+	_, err = s.controller.Client.VirtualMachine(vmCopy.Namespace).UpdateStatus(context.Background(), vmCopy, metav1.UpdateOptions{})
 
-	return true, nil
+	return true, err
 }
 
 func (s *vmSnapshotSource) getVMRevision() (*snapshotv1.VirtualMachine, error) {
@@ -286,17 +285,12 @@ func (s *vmSnapshotSource) Spec() (snapshotv1.SourceSpec, error) {
 }
 
 func (s *vmSnapshotSource) Online() (bool, error) {
-	vmRunning, err := checkVMRunning(s.vm)
-	if err != nil {
-		return false, err
-	}
-
 	exists, err := s.controller.checkVMIRunning(s.vm)
 	if err != nil {
 		return false, err
 	}
 
-	return (vmRunning || exists), nil
+	return exists, nil
 }
 
 func (s *vmSnapshotSource) GuestAgent() (bool, error) {
